@@ -66,6 +66,12 @@ static inline uintptr_t widened(uint32_t value)
     return value ? NATIVE_DOMAIN | value : 0;
 }
 
+#ifdef _WIN64
+/* a JSR's call of the game's C on Windows x64, which shim.c writes */
+uintptr_t native_win64_call(void *function, const uint64_t *ints,
+                            const float *floats, float *result);
+#endif
+
 /* FRCHG: the banks trade places */
 static inline void frchg(void)
 {

@@ -20,3 +20,4 @@ __pycache__/
 *.[Dd][Rr][Vv]
 *.[Gg][Dd][Ii]
 *.[Rr][Aa][Ww]
+/tools/sdl3-mingw

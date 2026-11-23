@@ -91,6 +91,45 @@ float _builtin_fsrra(float n)
     return sa_fsrra(n);
 }
 
+#ifdef _WIN64
+/* a call of the game's C by a JSR that names no function, on Windows x64.
+ * the SH-4 passes an argument in R4 to R7 or FR4 to FR7 by its class, where
+ * Windows passes it by its place, in RCX, RDX, R8, R9 or XMM0 to XMM3. This
+ * loads both sets at once, so a function whose arguments are all integers or
+ * pointers, or all floats, or none, finds them, and one that mixes the two
+ * does not. ints holds the four integer arguments, floats the four float
+ * ones, and the float result goes to *result. the integer result is the
+ * return value */
+__asm__(".text\n"
+        ".def native_win64_call; .scl 2; .type 32; .endef\n"
+        ".globl native_win64_call\n"
+        "native_win64_call:\n"
+        "    push %rbp\n"
+        "    mov %rsp, %rbp\n"
+        "    push %rsi\n"
+        "    push %rdi\n"
+        "    mov %r9, %rsi\n"
+        "    mov %rcx, %rax\n"
+        "    mov %rdx, %r10\n"
+        "    mov %r8, %r11\n"
+        "    sub $32, %rsp\n"
+        "    movss (%r11), %xmm0\n"
+        "    movss 4(%r11), %xmm1\n"
+        "    movss 8(%r11), %xmm2\n"
+        "    movss 12(%r11), %xmm3\n"
+        "    mov (%r10), %rcx\n"
+        "    mov 8(%r10), %rdx\n"
+        "    mov 16(%r10), %r8\n"
+        "    mov 24(%r10), %r9\n"
+        "    call *%rax\n"
+        "    movss %xmm0, (%rsi)\n"
+        "    add $32, %rsp\n"
+        "    pop %rdi\n"
+        "    pop %rsi\n"
+        "    pop %rbp\n"
+        "    ret\n");
+#endif
+
 /* the _atan2 mesh.src calls, which takes floats. a host's atan2 takes
  * doubles, so this calls the runtime's float body */
 extern float _in_atan2s(float y, float x);

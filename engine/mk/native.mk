@@ -523,13 +523,19 @@ $(NATIVE)/play: $(NATIVE_LINK_OBJ) $(NATIVE_PLAY_OBJ) $(NATIVE_LINKED)
 # build without SDL3 is, and play.exe holds C++'s runtime itself
 ifneq ($(NATIVE_WINDOWS),)
 NATIVE_CXX := $(LLVM_MINGW)/bin/x86_64-w64-mingw32-clang++
-NATIVE_PC_OBJ := $(patsubst %,$(NATIVE)/pc/%.o,$(filter-out window input,$(PC_SOURCES)) window_none) \
+# SDL3's MinGW release, unpacked under tools/sdl3-mingw/, gives the window and
+# the pads: window.cpp and input.cpp compile against its headers, link its
+# import library, and play.exe runs with SDL3.dll beside it. Without that
+# directory the build is headless as before
+SDL3_MINGW := $(firstword $(wildcard tools/sdl3-mingw/SDL3-*/x86_64-w64-mingw32))
+NATIVE_SDL3 := $(if $(SDL3_MINGW),$(SDL3_MINGW)/lib/libSDL3.dll.a)
+NATIVE_PC_OBJ := $(patsubst %,$(NATIVE)/pc/%.o,$(filter-out window input window_none,$(PC_SOURCES)) $(if $(NATIVE_SDL3),window input,window_none)) \
 	$(NATIVE)/sa1/client.o $(NATIVE)/sa1/basic.o $(NATIVE)/runtime/engine.o
 $(NATIVE)/pc/%.o: engine/pc/%.cpp $(REPLAY_DEPS) $(VULKAN) $(VULKAN_FETCHED) $(REPLAY_SHADERS) $(NATIVE_NEEDS)
 	@$(call status,c++,$<)
 	$(Q)mkdir -p $(@D)
 	$(Q)$(NATIVE_CXX) $(ENGINE_CXXFLAGS) -O2 -I$(ENGINE_INCLUDE) -Iengine/sa1 -Iengine/runtime -Itools/vulkan/include \
-		-Ibuild/engine/replay -c -o $@ $<
+		-Ibuild/engine/replay $(if $(filter window input,$*),$(if $(SDL3_MINGW),-I$(SDL3_MINGW)/include)) -c -o $@ $<
 $(NATIVE)/sa1/%.o: engine/sa1/%.cpp $(REPLAY_DEPS) $(NATIVE_NEEDS)
 	@$(call status,c++,$<)
 	$(Q)mkdir -p $(@D)
@@ -541,7 +547,8 @@ $(NATIVE)/runtime/%.o: engine/runtime/%.cpp engine/runtime/runtime.h engine/incl
 $(NATIVE)/play.exe: $(NATIVE_LINK_OBJ) $(NATIVE)/stubs.o $(NATIVE)/obj/engine/sa1/play.o $(NATIVE_PC_OBJ) \
 		$(NATIVE_LINKED)
 	@$(call status,link,$@)
-	$(Q)$(NATIVE_CXX) $(NATIVE_LINK_FLAGS) -o $@ $(filter %.o,$^) -lm
+	$(Q)$(NATIVE_CXX) $(NATIVE_LINK_FLAGS) -o $@ $(filter %.o,$^) $(NATIVE_SDL3) -lm
+	$(Q)$(if $(SDL3_MINGW),cp $(SDL3_MINGW)/bin/SDL3.dll $(@D)/)
 endif
 
 # The census of what stands between the game's C and the host
@@ -582,7 +589,7 @@ NATIVE_REQUEST := $(strip host $(NATIVE_HOST) opt $(NATIVE_OPT) \
 	resource $(NATIVE_RESOURCE))
 $(call record,$(NATIVE)/request.txt,$(NATIVE_REQUEST))
 $(call record,$(NATIVE)/objects.txt,$(strip $(NATIVE_PROGRAM_OBJ) rest: $(NATIVE_REST_OBJ) play: $(NATIVE_PLAY_OBJ) \
-	$(NATIVE_PC_OBJ) libraries: $(PC_LIBS)))
+	$(NATIVE_PC_OBJ) libraries: $(PC_LIBS) $(NATIVE_SDL3)))
 # The run keeps its log whether it reaches its frames or stops at a fault,
 # which names the stub or the blocker the census counts. It opens no engine,
 # so it needs no device. The log's last line is the run's status: exit 0

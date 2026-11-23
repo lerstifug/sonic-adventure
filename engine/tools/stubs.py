@@ -86,6 +86,9 @@ Row = namedtuple('Row', 'kind host where')
 # the host's C library, whose definitions the slice links to by name
 LIBC = '/lib/x86_64-linux-gnu/libc.so.6'
 LIBM = '/lib/x86_64-linux-gnu/libm.so.6'
+# the host's functions whose addresses the slice's assembly reads and no
+# object calls
+HOST_ADDRESSED = {'atan2', 'cos'}
 DATA_BYTES = 0x10000
 HEAP = 'heap_arena'
 # the alignment src/system/task.c gives heap_arena
@@ -200,8 +203,12 @@ def main(out, *args):
     ends = {WORK[image][0]: Config(image).span()[1] for image in WORK}
     # a name the slice reads where COFF's library gives code is the game's
     # own, as SHC's _errno is a word and the UCRT's a function
+    # except atan2 and cos, which engine/mk/native.mk's NATIVE_HOST_LIB leaves
+    # to the host's C. The adapter's assembly takes their addresses and
+    # calls native_atan2 and the like, so no call of theirs stands, but the
+    # library's code is the word that address means, as glibc's is on Linux
     if coff:
-        host -= host_code - called
+        host -= host_code - called - HOST_ADDRESSED
     missing = sorted(n for n in used - defined - host - LINKER if not n.startswith('__real_'))
     placed = places([name for name in missing if name not in called])
     use = {name: ADDRESS if name in ends or name in placed else FUNCTION if name in called else ZEROS
