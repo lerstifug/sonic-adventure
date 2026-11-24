@@ -1,0 +1,227 @@
+; the PS2's VU1 program for a model's batch (engine/ps2/gs.cpp's
+; ps2_vu_open and ps2_vu_close, which engine/ps2/sa1/models.h fills): the
+; corners of one or more of a meshset's strips, each carried by the model's
+; matrix to view space, projected, lit, culled, and sent to the GS as one
+; triangle strip by XGKICK. the strips join with no corner of their own:
+; each strip's first two corners draw nothing, by XYZF2's ADC bit, which the
+; GS takes as XYZF3.
+;
+; VU1's memory: qwords 0 to 63 hold the picture's fog table (strip.vsm's),
+; 64 to 319 the palette models.h's draws light by, and from 320 two buffers
+; of 352 qwords take turns (VIF's BASE and OFFSET). XTOP gives this batch's:
+;
+;   0       the GIF tag of the strip: PRE, PRIM, PACKED, RGBAQ XYZF2
+;   1       x: the corners' count, an integer
+;   2-5     the model's matrix, Ninja's rows: a point is a row times it
+;   6       the screen's scale: focal x, focal y, the depth's most, 0
+;   7       its bias: center x and y, as the GS's pixels place them
+;   8       the color's scale for the GS: red, green, blue and alpha's
+;   9       1e30, 0, 0, 2048: the ADC bit of XYZF2's fourth word over 16
+;   10      the light in the model's space: x, y, z, 0
+;   11      the palette's color's scale: red, green, blue, alpha
+;   12      what adds to it: red, green, blue, alpha, of 255
+;   13      127.5, 255, 1/65536, 1/256
+;   14      65536, 256, 0, 0
+;   15-     the corners, two qwords each: the point's x, y and z, and the
+;           corner's word; then the normal's x, y and z, and 0. the word is
+;           2 where the corner starts a strip, else the cull's turn for the
+;           triangle it ends, 1 to drop it where its pixels turn one way, -1
+;           the other, 0 never
+;   15+2n   the strip as the GS takes it: the GIF tag, then for each
+;           corner RGBAQ and XYZF2
+;
+; a palette entry is a qword: its color's red, green and blue as one whole
+; number, red times 65536 plus green times 256 plus blue, which a float
+; holds exactly; its offset's the same; and its color's alpha. a corner
+; takes the entry its normal's dot with the light picks, as the walk does
+; (engine/psp/sa1/walk.h): 127.5 plus 127.5 times the dot, held to 0 to
+; 255. its color is the entry's times the scale, plus the add, times the
+; GS's scale.
+;
+; a corner's w goes to start = max(w - 1, 0) and turn = w - 2 start, and
+; its triangle draws nothing where turn times its pixels' area, plus start,
+; is above 0. VF22 and VF23 hold the last two corners' pixels
+        .vu
+        .align 4
+        .global VU1Model_CodeStart
+        .global VU1Model_CodeEnd
+VU1Model_CodeStart:
+        NOP                     xtop VI02
+        NOP                     NOP
+        NOP                     ilw.x VI03, 1(VI02)
+        NOP                     lq VF01, 2(VI02)
+        NOP                     lq VF02, 3(VI02)
+        NOP                     lq VF03, 4(VI02)
+        NOP                     lq VF04, 5(VI02)
+        NOP                     lq VF05, 6(VI02)
+        NOP                     lq VF06, 7(VI02)
+        NOP                     lq VF07, 8(VI02)
+        NOP                     lq VF08, 9(VI02)
+        NOP                     lq VF09, 10(VI02)
+        NOP                     lq VF18, 11(VI02)
+        NOP                     lq VF19, 12(VI02)
+        NOP                     lq VF20, 13(VI02)
+        NOP                     lq VF24, 14(VI02)
+        NOP                     lq VF21, 0(VI02)
+        NOP                     iaddiu VI04, VI02, 15
+        NOP                     iadd VI05, VI04, VI03
+        NOP                     iadd VI05, VI05, VI03
+        sub.xy VF22, VF00, VF00 NOP
+        sub.xy VF23, VF00, VF00 NOP
+        NOP                     NOP
+        NOP                     sq VF21, 0(VI05)
+        NOP                     iaddiu VI06, VI05, 1
+model_corner:
+        NOP                     lq VF10, 0(VI04)
+        NOP                     lq VF16, 1(VI04)
+        NOP                     NOP
+        NOP                     NOP
+        NOP                     NOP
+        mulax ACC, VF01, VF10x  NOP
+        madday ACC, VF02, VF10y NOP
+        maddaz ACC, VF03, VF10z NOP
+        maddw VF11, VF04, VF00w NOP
+        mul.xyz VF17, VF16, VF09 NOP
+        subw.w VF12, VF10, VF00w NOP
+        NOP                     NOP
+        NOP                     NOP
+        NOP                     div Q, VF00w, VF11z
+        mulax.w ACC, VF00, VF17x NOP
+        madday.w ACC, VF00, VF17y NOP
+        maddz.w VF17, VF00, VF17z NOP
+        maxx.w VF12, VF12, VF00x NOP
+        mul.xy VF15, VF11, VF05 NOP
+        mulx.w VF17, VF17, VF20x NOP
+        sub.w VF14, VF10, VF12  NOP
+        addx.w VF17, VF17, VF20x NOP
+        sub.w VF14, VF14, VF12  NOP
+        maxx.w VF17, VF17, VF00x NOP
+        miniy.w VF17, VF17, VF20y NOP
+        ftoi0.w VF17, VF17      NOP
+        NOP                     NOP
+        NOP                     NOP
+        NOP                     NOP
+        NOP                     mtir VI07, VF17w
+        NOP                     NOP
+        NOP                     iaddiu VI07, VI07, 64
+        NOP                     NOP
+        NOP                     lq VF25, 0(VI07)
+        NOP                     waitq
+        mulq.xy VF15, VF15, Q   NOP
+        mulq.z VF15, VF05, Q    NOP
+        NOP                     NOP
+        add.xy VF15, VF15, VF06 NOP
+        mulz.x VF26, VF25, VF20z NOP
+        NOP                     NOP
+        NOP                     NOP
+        NOP                     NOP
+        ftoi0.x VF26, VF26      NOP
+        NOP                     NOP
+        NOP                     NOP
+        NOP                     NOP
+        itof0.x VF26, VF26      NOP
+        NOP                     NOP
+        NOP                     NOP
+        NOP                     NOP
+        mulx.x VF27, VF24, VF26x NOP
+        NOP                     NOP
+        NOP                     NOP
+        NOP                     NOP
+        sub.x VF27, VF25, VF27  NOP
+        NOP                     NOP
+        NOP                     NOP
+        NOP                     NOP
+        mulw.x VF28, VF27, VF20w NOP
+        NOP                     NOP
+        NOP                     NOP
+        NOP                     NOP
+        ftoi0.x VF28, VF28      NOP
+        NOP                     NOP
+        NOP                     NOP
+        NOP                     NOP
+        itof0.x VF28, VF28      NOP
+        NOP                     NOP
+        NOP                     NOP
+        NOP                     NOP
+        muly.x VF31, VF28, VF24y NOP
+        addx.x VF29, VF00, VF26x NOP
+        addx.y VF29, VF00, VF28x NOP
+        mulz.w VF29, VF00, VF25z NOP
+        sub.x VF31, VF27, VF31  NOP
+        NOP                     NOP
+        NOP                     NOP
+        NOP                     NOP
+        addx.z VF29, VF00, VF31x NOP
+        NOP                     NOP
+        NOP                     NOP
+        NOP                     NOP
+        mul VF29, VF29, VF18    NOP
+        NOP                     NOP
+        NOP                     NOP
+        NOP                     NOP
+        add VF29, VF29, VF19    NOP
+        NOP                     NOP
+        NOP                     NOP
+        NOP                     NOP
+        mul VF29, VF29, VF07    NOP
+        NOP                     NOP
+        NOP                     NOP
+        NOP                     NOP
+        ftoi0 VF13, VF29        NOP
+        sub.xy VF26, VF23, VF22 NOP
+        sub.xy VF27, VF15, VF22 NOP
+        add.xy VF22, VF00, VF23 NOP
+        add.xy VF23, VF00, VF15 NOP
+        NOP                     NOP
+        NOP                     NOP
+        muly.x VF28, VF26, VF27y NOP
+        mulx.y VF28, VF26, VF27x NOP
+        NOP                     NOP
+        NOP                     NOP
+        NOP                     NOP
+        suby.x VF28, VF28, VF28y NOP
+        NOP                     NOP
+        NOP                     NOP
+        NOP                     NOP
+        mulw.x VF28, VF28, VF14w NOP
+        NOP                     NOP
+        NOP                     NOP
+        NOP                     NOP
+        mulx.x VF28, VF28, VF08x NOP
+        NOP                     NOP
+        NOP                     NOP
+        NOP                     NOP
+        addw.x VF28, VF28, VF12w NOP
+        NOP                     NOP
+        NOP                     NOP
+        NOP                     NOP
+        maxx.x VF28, VF28, VF00x NOP
+        NOP                     NOP
+        NOP                     NOP
+        NOP                     NOP
+        miniw.x VF28, VF28, VF00w NOP
+        NOP                     NOP
+        NOP                     NOP
+        NOP                     NOP
+        mulx.w VF15, VF08, VF28x NOP
+        NOP                     NOP
+        NOP                     NOP
+        NOP                     NOP
+        ftoi4 VF15, VF15        NOP
+        NOP                     NOP
+        NOP                     NOP
+        NOP                     NOP
+        NOP                     sq VF13, 0(VI06)
+        NOP                     sq VF15, 1(VI06)
+        NOP                     iaddiu VI06, VI06, 2
+        NOP                     iaddiu VI04, VI04, 2
+        NOP                     isubiu VI03, VI03, 1
+        NOP                     NOP
+        NOP                     NOP
+        NOP                     ibne VI03, VI00, model_corner
+        NOP                     NOP
+        NOP                     xgkick VI05
+        NOP[E]                  NOP
+        NOP                     NOP
+        .align 4
+VU1Model_CodeEnd:

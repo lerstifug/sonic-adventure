@@ -255,7 +255,7 @@ $(PS2)/stubs.c: $(PS2_STUBBED) $(NATIVE_PROGRAMS:%=$(PS2)/program-%.o) engine/to
 		engine/native/stubs.txt $(PS2_MEMORY) config/1st_read/symbols.txt config/1st_read/imports.txt $(PS2_NEEDS)
 	@$(call status,stubs,$@)
 	$(Q)NM=$(PS2_BIN)nm READELF=$(PS2_BIN)readelf python3 engine/tools/stubs.py $@ $(PS2_STUBBED) \
-		$(NATIVE_PROGRAMS:%=$(PS2)/program-%.o) --aliases $(PS2)/aliases.txt --host psp --placed $(PS2)/placed.txt \
+		$(NATIVE_PROGRAMS:%=$(PS2)/program-%.o) --aliases $(PS2)/aliases.txt --host ps2 --placed $(PS2)/placed.txt \
 		--libraries $(PS2_LIBRARIES)
 $(PS2)/stubs.o: $(PS2)/stubs.c $(PS2_NEEDS)
 	$(Q)$(PS2_CC) -std=gnu17 -O1 -G0 -w -c -o $@ $<

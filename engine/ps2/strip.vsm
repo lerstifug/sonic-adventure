@@ -5,8 +5,9 @@
 ;
 ; VU1's memory: qwords 0 to 63 hold the picture's fog table, the GS's fog
 ; for each step of the square root of 1/z times the density, in x, from
-; 1 to 16 by quarters. from 64, two buffers of 480 qwords take turns
-; (VIF's BASE and OFFSET), and XTOP gives this batch's:
+; 1 to 16 by quarters. 64 to 319 hold model.vsm's palette, and from 320
+; two buffers of 352 qwords take turns (VIF's BASE and OFFSET), and XTOP
+; gives this batch's:
 ;
 ;   0       the GIF tag of the strip: PRE, PRIM, PACKED, ST RGBAQ XYZF2
 ;   1       x: the corners' count, an integer; y 0; z the cull's turn, 1

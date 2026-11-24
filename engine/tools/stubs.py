@@ -1,7 +1,7 @@
 """Stubs for the native slice's missing names, each by its row of stubs.txt.
 
 stubs.py OUT OBJECT... [--aliases FILE] [--base DOMAIN] [--libraries LIBRARY...]
-[--host psp --placed FILE] [--explore] writes OUT, C that defines each name
+[--host psp|ps2 --placed FILE] [--explore] writes OUT, C that defines each name
 the objects use and none of them defines, but for those the host's C library
 gives, glibc's or the LIBRARIES', and FILE's, which the link names
 "NAME SYMBOL" a line. The objects' and libraries' names come from the
@@ -12,13 +12,14 @@ environment's READELF gives. The PSP has no memory at the console's
 addresses, so OUT defines no name of kind address there: --placed's FILE
 lists each, "NAME ADDRESS ROOM" a line for a place and "NAME = VALUE" for
 the word that holds an image's end, each address the console's, and the
-PSP's link places them (engine/tools/psplink.py).
+PSP's link places them (engine/tools/psplink.py). --host ps2 speaks for the
+PS2's, as the PSP's: its rows are the PSP's and its own.
 
 engine/native/stubs.txt allows each such name. A row is
 
     NAME  KIND  HOST  REASON
 
-HOST is linux, windows or psp, the host whose objects need the name, or *
+HOST is linux, windows, psp or ps2, the host whose objects need the name, or *
 for all. REASON says what the name is on the console, what of the game needs
 it, and what the game makes of the stub. KIND is what stubs.py writes, and
 whether the PC needs more:
@@ -89,7 +90,7 @@ TABLE = Path(__file__).parents[1] / 'native/stubs.txt'
 FUNCTION, ZEROS, ADDRESS, ENGINE, UNSUPPORTED = KINDS = ('function', 'zeros', 'address', 'engine', 'unsupported')
 # the uses of a name that each kind stands for
 FITS = {FUNCTION: {FUNCTION}, ZEROS: {ZEROS}, ADDRESS: {ADDRESS}, ENGINE: {FUNCTION}, UNSUPPORTED: {FUNCTION, ZEROS}}
-HOSTS = ('linux', 'windows', 'psp')
+HOSTS = ('linux', 'windows', 'psp', 'ps2')
 EVERY = '*'
 # a row's kind and host, and its path:line
 Row = namedtuple('Row', 'kind host where')
@@ -121,7 +122,8 @@ def rows(path, host):
     """The rows of the table at path that speak for host, as {NAME: Row}.
     Fails, naming the row's path:line, on a row out of the form the module
     docstring gives, and on a second row that speaks for a host a name's
-    earlier row speaks for."""
+    earlier row speaks for. The PS2's rows are the PSP's and its own, so a
+    PSP row speaks for the PS2 too."""
     found, seen = {}, {}
     for where, fields in table_rows(path):
         if len(fields) < 4 or not NAME.fullmatch(fields[0]):
@@ -131,11 +133,12 @@ def rows(path, host):
             fail(f'{where}: {kind}: not a kind, one of {", ".join(KINDS)}')
         if given != EVERY and given not in HOSTS:
             fail(f'{where}: {given}: not a host, {EVERY} or one of {", ".join(HOSTS)}')
-        for other in HOSTS if given == EVERY else (given,):
+        speaks = HOSTS if given == EVERY else ('psp', 'ps2') if given == 'psp' else (given,)
+        for other in speaks:
             if (name, other) in seen:
                 fail(f'{where}: {name} has a row already, at {seen[name, other]}')
             seen[name, other] = where
-        if given in (EVERY, host):
+        if host in speaks:
             found[name] = Row(kind, given, where)
     return found
 
@@ -201,12 +204,13 @@ def main(out, *args):
         at = args.index('--base')
         base = int(args[at + 1], 0)
         args = args[:at] + args[at + 2:]
-    psp, placed_out = False, None
+    psp, placed_out, mips = False, None, 'psp'
     if '--host' in args:
         at = args.index('--host')
-        if args[at + 1] != 'psp':
-            fail(f'--host {args[at + 1]}: the objects say their host, but the PSP\'s, which --host psp names')
-        psp = True
+        if args[at + 1] not in ('psp', 'ps2'):
+            fail(f'--host {args[at + 1]}: the objects say their host, but the PSP\'s and the PS2\'s, which '
+                 '--host psp and --host ps2 name')
+        psp, mips = True, args[at + 1]
         args = args[:at] + args[at + 2:]
     if '--placed' in args:
         at = args.index('--placed')
@@ -261,7 +265,7 @@ def main(out, *args):
     use = {name: ADDRESS if name in ends or name in placed else FUNCTION if name in called else ZEROS
            for name in missing}
     # the slice's objects are COFF for Windows alone
-    target = 'psp' if psp else HOSTS[coff]
+    target = mips if psp else HOSTS[coff]
     allowed = rows(TABLE, target)
     said = {FUNCTION: 'an object calls it', ZEROS: 'no object calls it and the tables place none of it',
             ADDRESS: 'the tables place it'}

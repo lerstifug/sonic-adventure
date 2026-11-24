@@ -17,8 +17,9 @@
  * (engine/native/pads.c), trace 1 has the log name each file the game
  * opens and each program it loads, video 480p or 480i sets the screen's
  * mode, 480p by default, deflicker 0 turns 480i's flicker filter off, and
- * dither 0 the dither of the 16-bit screen, and vu 0 keeps every strip on
- * the EE.
+ * dither 0 the dither of the 16-bit screen, vu 0 keeps every strip on the
+ * EE, and models 1 draws the models by the PS2's own path, which comes in
+ * stages (engine/ps2/sa1/models.h).
  *
  * the runner opens the engine, whose raster is the GS's (gs.cpp): the
  * adapter draws to it as the game calls. its window reads the pads
@@ -69,6 +70,9 @@ int ps2_dither = 1;
 int ps2_profile = 0;
 /* vu 0 draws every strip on the EE, as before VU1 drew the opaque ones */
 int ps2_vu = 1;
+/* models 1 draws the game's models by the PS2's own path
+ * (engine/ps2/sa1/models.h) in the walk's place, stage by stage */
+int ps2_models = 0;
 /* the sampling profiler's (engine/ps2/profile.c) */
 static int sampling;
 void ps2_profile_start(void);
@@ -231,6 +235,10 @@ static int take_target(const char *name, const char *value)
     }
     if (!strcmp(name, "vu")) {
         ps2_vu = atoi(value);
+        return 1;
+    }
+    if (!strcmp(name, "models")) {
+        ps2_models = atoi(value);
         return 1;
     }
     /* sample 1: the sampling profiler (profile.c) */

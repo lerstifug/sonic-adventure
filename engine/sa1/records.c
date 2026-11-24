@@ -1848,6 +1848,12 @@ static void parts_settle(int kept)
 #ifdef SA_SMALL
 static uint32_t walk_lost;
 #include "sa1/walk.h"
+#ifdef _EE
+/* the PS2's own model path, in the walk's place where the settings' models
+ * 1 asks (engine/ps2/main.c) */
+extern int ps2_models;
+#include "sa1/models.h"
+#endif
 #endif
 
 void sa1_record_model(const NJS_MODEL *model, uint8_t mode,
@@ -1890,7 +1896,11 @@ void sa1_record_model(const NJS_MODEL *model, uint8_t mode,
     (void)reads;
     (void)draw;
     psp_walk_begin();
+#ifdef _EE
+    if (ps2_models ? !models_draw(model, mode, &state) : !walk_model(model, mode, &state)) {
+#else
     if (!walk_model(model, mode, &state)) {
+#endif
         picture_lost++;
         walk_lost++;
     }
