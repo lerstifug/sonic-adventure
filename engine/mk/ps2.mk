@@ -206,6 +206,13 @@ $(PS2_CXX_OBJ): $(PS2)/obj/%.o: %.cpp $(PS2_NEEDS)
 	$(Q)mkdir -p $(@D)
 	$(Q)$(PS2_CXX) $(PS2_CXXFLAGS) -MD -MP -c -o $@ $<
 -include $(PS2_CXX_OBJ:.o=.d)
+# VU1's program for the raster's strips, by the vector units' assembler
+PS2_VU_SOURCES := $(wildcard engine/ps2/*.vsm)
+PS2_VU_OBJ := $(PS2_VU_SOURCES:%.vsm=$(PS2)/obj/%.vu.o)
+$(PS2_VU_OBJ): $(PS2)/obj/%.vu.o: %.vsm
+	@$(call status,ps2,$<)
+	$(Q)mkdir -p $(@D)
+	$(Q)$(PS2DEV)/dvp/bin/dvp-as -o $@ $<
 
 # A program links alone first, as psp.mk's does, and keeps global only the
 # names something else reads, by programs.py's rules
@@ -237,7 +244,7 @@ PS2_LIBRARIES := $(addprefix $(PS2_LIBC)/,libc.a libm.a libcglue.a libkernel.a l
 # play.c opens the engine, as on the PSP. The drawer's calls are the
 # engine's rows, which the C++ defines out of stubs.py's sight, as the
 # PSP's does
-PS2_MAIN_OBJ := $(PS2_REST_OBJ) $(PS2_CXX_OBJ) $(PS2)/obj/engine/sa1/play.o
+PS2_MAIN_OBJ := $(PS2_REST_OBJ) $(PS2_CXX_OBJ) $(PS2)/obj/engine/sa1/play.o $(PS2_VU_OBJ)
 PS2_STUBBED := $(PS2_REST_OBJ)
 -include $(PS2)/obj/engine/sa1/play.d
 $(PS2)/stubs.c: $(PS2_STUBBED) $(NATIVE_PROGRAMS:%=$(PS2)/program-%.o) engine/tools/stubs.py \

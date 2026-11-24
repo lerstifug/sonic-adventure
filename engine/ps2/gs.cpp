@@ -61,6 +61,10 @@ extern "C" {
 #include "raster.h"
 #include "texels.h"
 
+/* VU1's program for a strip (engine/ps2/strip.vsm) */
+extern "C" uint32_t VU1Strip_CodeStart __attribute__((section(".vudata")));
+extern "C" uint32_t VU1Strip_CodeEnd __attribute__((section(".vudata")));
+
 /* the walk's figures (engine/psp/sa1/walk.h) */
 extern "C" uint32_t ps2_walk_load_us, ps2_walk_light_us;
 
@@ -73,6 +77,8 @@ extern "C" int ps2_dither;
 /* whether the run times the raster's strips and binds one by one, as the
  * settings' profile 1 asks: the clock takes its own time at each */
 extern "C" int ps2_profile;
+/* whether opaque strips go to VU1 (engine/ps2/main.c's vu) */
+extern "C" int ps2_vu;
 
 static inline uint32_t stamp()
 {
@@ -112,9 +118,27 @@ constexpr float NEAR_Z = 1.0F;
  * middle */
 constexpr float REACH = 5.0F;
 constexpr float DEPTH_MOST = 65535.0F;
-/* the bytes of each of gsKit's two one-shot queues: a picture's commands.
- * a picture that fills one loses its later draws, which lost counts */
-constexpr int QUEUE_BYTES = 3 << 19;
+/* the qwords of each of VIF1's two streams, a picture's commands: a
+ * picture that fills one sends it and goes on in the other */
+constexpr uint32_t STREAM_QWORDS = 3U << 15;
+/* the words a stream keeps spare past any write, for its last tags */
+constexpr uint32_t STREAM_SPARE = 64;
+/* the most qwords of a DMA tag's, of a DIRECT's and of a GIF tag's loops */
+constexpr uint32_t TAG_MOST = 65535, DIRECT_MOST = 65535, IMAGE_MOST = 32767;
+/* VIF1's codes */
+constexpr uint32_t VIF_STCYCL = 0x01, VIF_OFFSET = 0x02, VIF_BASE = 0x03, VIF_FLUSHE = 0x10, VIF_FLUSH = 0x11,
+                   VIF_MSCAL = 0x14, VIF_DIRECT = 0x50, VIF_MPG = 0x4a;
+constexpr uint32_t UNPACK_V4_32 = 0x6c, UNPACK_V3_32 = 0x68, UNPACK_V2_16 = 0x65, UNPACK_V4_8 = 0x6e;
+constexpr uint32_t UNPACK_USN = 0x4000, UNPACK_TOPS = 0x8000;
+/* DMA tags' ids */
+constexpr uint32_t TAG_CNT = 1, TAG_REF = 3, TAG_END = 7;
+/* the GS's memory in blocks of 256 bytes, the unit a texture's place is in */
+constexpr uint32_t VRAM_BLOCKS = 4U * 1024 * 1024 / 256;
+/* VU1's memory: the fog table's 64 qwords, then two batches' 480 each */
+constexpr uint32_t VU_FOG = 64, VU_BASE = 64, VU_OFFSET = 480;
+/* the corners a batch of VU1's takes at most: its 12 qwords of head, 4 of
+ * each corner and 3 of each corner sent fit in 480 */
+constexpr uint32_t VU_CORNERS = 64;
 /* the corners of the strips kept for the picture's end */
 constexpr uint32_t KEPT_CORNERS = 1U << 14;
 /* the triangles that blend a picture holds for its sort. past them a
@@ -143,6 +167,11 @@ struct Texture {
     bool cuts = false;
     /* the copies mirrored in u, in v, and in both, made at their first use */
     Texture *mirrored[3] = {nullptr, nullptr, nullptr};
+    /* its place in the GS's memory, in blocks, -1 where it lies there no
+     * more, the blocks it takes, and the picture that last bound it */
+    int32_t block = -1;
+    uint32_t blocks = 0;
+    uint32_t used = 0;
 };
 
 /* what a draw is drawn under: a strip's psp_state, or a batch's State */
@@ -259,10 +288,24 @@ struct Held {
     /* the screen buffer the open picture draws into, 0 or 1: the other
      * shows, or shows from the next blank (flip_at_blank) */
     uint32_t draw_buffer = 0;
-    /* the textures bound this picture. a picture dropped takes its
-     * commands back, the sends of their texels among them, so the manager
-     * hears they lie in its memory no more */
-    std::vector<Texture *> binds;
+    /* VIF1's two streams, as DMA chains: the one the EE writes, its words
+     * written, its open CNT tag's word and its open DIRECT's, -1 where
+     * none. a DIRECT after VU1's work waits for it by a FLUSH */
+    uint32_t *stream[2] = {nullptr, nullptr};
+    uint32_t writing = 0, at = 0;
+    int32_t tag = -1, direct = -1;
+    bool vu_since = false;
+    /* whether the picture sent VU1 its fog table */
+    bool vu_fog = false;
+    /* the textures whose texels the unsent stream sends: a picture taken
+     * back takes them back, and they lie in the GS's memory no more */
+    std::vector<Texture *> uploads;
+    /* texels freed while a stream may send them, freed once it's sent */
+    std::vector<void *> dying, dying_sent;
+    /* the textures in the GS's memory, by place, and its first block past
+     * the screens and the depth */
+    std::vector<Texture *> resident;
+    uint32_t vram_first = 0;
     /* figures for psp_draw_report */
     uint32_t pictures = 0, lost = 0, most_textures = 0, texture_bytes = 0;
     uint32_t most_queue = 0, most_blends = 0, blends_past = 0, mirrors = 0;
@@ -271,6 +314,8 @@ struct Held {
     uint32_t timed = 0, triangles = 0;
     uint64_t make_us = 0, gs_us = 0, strip_us = 0, bind_us = 0;
     uint32_t sends = 0; /* the textures a bind sent */
+    uint32_t vu_batches = 0, vu_triangles = 0; /* VU1's batches and their triangles */
+    uint32_t strips_past = 0; /* strips wholly past a side, dropped */
     uint32_t reported = 0; /* the clock at the last report */
     /* the figures as the picture opened, for a slow one's own */
     uint32_t picture_triangles = 0, picture_sends = 0, picture_load_us = 0;
@@ -311,23 +356,217 @@ uint32_t side_log2(uint32_t n)
     return l;
 }
 
-/* the queue's bytes left for this picture */
-uint32_t queue_left(const Held &r)
-{
-    GSQUEUE *q = r.gs->CurQueue;
-    uint8_t *end = static_cast<uint8_t *>(q->pool_max[q->dbuf]);
-    uint8_t *at = static_cast<uint8_t *>(q->pool_cur);
+/* the commands go to the GS by one stream of VIF1's, in their order: the
+ * EE's own packets of the GIF's by DIRECT, VU1's batches, which VU1 sends
+ * the GIF by XGKICK, and the texels of a texture by DIRECT from where the
+ * EE keeps them, by a REF tag of the stream's DMA chain. the GIF takes
+ * VU1's path first where both wait, so a DIRECT after VU1's work waits for
+ * it to end. a stream goes at the picture's end, while the EE writes the
+ * other, or sooner where it fills */
+volatile uint32_t *const D1_CHCR = reinterpret_cast<volatile uint32_t *>(0x10009000);
+volatile uint32_t *const D1_MADR = reinterpret_cast<volatile uint32_t *>(0x10009010);
+volatile uint32_t *const D1_QWC = reinterpret_cast<volatile uint32_t *>(0x10009020);
+volatile uint32_t *const D1_TADR = reinterpret_cast<volatile uint32_t *>(0x10009030);
+constexpr uint32_t CHCR_STR = 0x100;
 
-    return end > at ? static_cast<uint32_t>(end - at) : 0;
+/* the buffer the display shows from the next blank, or -1: flip_at_blank */
+volatile int32_t flip_pending = -1;
+
+uint32_t vif_code(uint32_t command, uint32_t num, uint32_t immediate)
+{
+    return immediate | num << 16 | command << 24;
+}
+
+uint32_t *words(Held &r)
+{
+    return r.stream[r.writing];
+}
+
+void put(Held &r, uint32_t word)
+{
+    words(r)[r.at++] = word;
+}
+
+uint32_t physical(const void *p)
+{
+    return static_cast<uint32_t>(reinterpret_cast<uintptr_t>(p)) & 0x0fffffffU;
+}
+
+void vif_wait()
+{
+    while ((*D1_CHCR & CHCR_STR) != 0) {
+    }
+}
+
+/* the open DIRECT's count, its qwords since */
+void close_direct(Held &r)
+{
+    if (r.direct >= 0) {
+        words(r)[r.direct] = vif_code(VIF_DIRECT, 0, (r.at - static_cast<uint32_t>(r.direct) - 1) / 4);
+        r.direct = -1;
+    }
+}
+
+/* a CNT tag opens where none is open, at a qword's start */
+void open_tag(Held &r)
+{
+    if (r.tag < 0) {
+        r.tag = static_cast<int32_t>(r.at);
+        r.at += 4;
+    }
+}
+
+/* the open CNT tag takes its qwords since: the words to a qword's end are
+ * VIF1's NOPs */
+void close_tag(Held &r)
+{
+    close_direct(r);
+    if (r.tag < 0) {
+        return;
+    }
+    while (r.at % 4 != 0) {
+        put(r, 0);
+    }
+    uint32_t *t = words(r) + r.tag;
+    uint32_t qwords = (r.at - static_cast<uint32_t>(r.tag)) / 4 - 1;
+
+    if (qwords == 0) {
+        r.at = static_cast<uint32_t>(r.tag);
+    } else {
+        t[0] = qwords | TAG_CNT << 28;
+        t[1] = t[2] = t[3] = 0;
+    }
+    r.tag = -1;
+}
+
+void send_stream(Held &r, bool last);
+
+/* room for count words in the open CNT tag: a stream that would fill goes
+ * at once, and a tag that would pass its most closes */
+void room(Held &r, uint32_t count)
+{
+    if (r.at + count + STREAM_SPARE > STREAM_QWORDS * 4) {
+        send_stream(r, false);
+    }
+    open_tag(r);
+    if ((r.at - static_cast<uint32_t>(r.tag) + count) / 4 + 2 > TAG_MOST) {
+        close_tag(r);
+        open_tag(r);
+    }
+}
+
+/* one of VIF1's own codes */
+void vif(Held &r, uint32_t code)
+{
+    room(r, 4);
+    close_direct(r);
+    put(r, code);
+}
+
+/* room for qwords of the GIF's in the open DIRECT, or a new one's */
+u64 *gif(Held &r, uint32_t qwords)
+{
+    room(r, qwords * 4 + 8);
+    if (r.direct >= 0 && (r.at - static_cast<uint32_t>(r.direct) - 1) / 4 + qwords > DIRECT_MOST) {
+        close_direct(r);
+    }
+    if (r.direct < 0) {
+        if (r.vu_since) {
+            put(r, vif_code(VIF_FLUSH, 0, 0));
+            r.vu_since = false;
+        }
+        /* a DIRECT's qwords start at a qword's start */
+        while (r.at % 4 != 3) {
+            put(r, 0);
+        }
+        r.direct = static_cast<int32_t>(r.at);
+        put(r, 0);
+    }
+    u64 *p = reinterpret_cast<u64 *>(words(r) + r.at);
+
+    r.at += qwords * 4;
+    return p;
+}
+
+/* the GS's texels from the EE's memory, qwords of them, after their
+ * transfer's registers: each part of a GIF tag's most by its own DIRECT,
+ * its texels by a REF tag. texels the stream sends lie as they are until
+ * it's sent */
+void send_texels(Held &r, const void *texels, uint32_t qwords)
+{
+    const uint8_t *from = static_cast<const uint8_t *>(texels);
+
+    for (uint32_t done = 0; done < qwords;) {
+        uint32_t n = std::min(qwords - done, IMAGE_MOST);
+
+        room(r, 16);
+        close_direct(r);
+        if (r.vu_since) {
+            put(r, vif_code(VIF_FLUSH, 0, 0));
+            r.vu_since = false;
+        }
+        while (r.at % 4 != 3) {
+            put(r, 0);
+        }
+        put(r, vif_code(VIF_DIRECT, 0, n + 1));
+        u64 *p = reinterpret_cast<u64 *>(words(r) + r.at);
+
+        p[0] = GIF_TAG(n, 1, 0, 0, GSKIT_GIF_FLG_IMAGE, 0);
+        p[1] = 0;
+        r.at += 4;
+        close_tag(r);
+        uint32_t *t = words(r) + r.at;
+
+        t[0] = n | TAG_REF << 28;
+        t[1] = physical(from + done * 16);
+        t[2] = t[3] = 0;
+        r.at += 4;
+        done += n;
+    }
+}
+
+/* the stream so far to VIF1, once the one before is sent, and the EE
+ * writes the other. a stream draws into the picture's buffer, so it waits
+ * for the last picture's flip, the buffer showing till then. the last of
+ * a picture's ends in the GS's FINISH, which the flip waits for */
+void send_stream(Held &r, bool last)
+{
+    close_tag(r);
+    uint32_t *t = words(r) + r.at;
+
+    t[0] = TAG_END << 28;
+    t[1] = t[2] = t[3] = 0;
+    r.at += 4;
+    r.most_queue = std::max(r.most_queue, r.at * 4);
+    while (flip_pending >= 0) {
+    }
+    vif_wait();
+    for (void *p : r.dying_sent) {
+        free(p);
+    }
+    r.dying_sent.swap(r.dying);
+    r.dying.clear();
+    r.uploads.clear();
+    if (last) {
+        *GS_CSR = 2;
+    }
+    FlushCache(0);
+    *D1_QWC = 0;
+    *D1_TADR = physical(words(r));
+    *D1_CHCR = 0x105; /* from memory, a chain, no tags to VIF1 */
+    r.writing ^= 1;
+    r.at = 0;
+    r.tag = -1;
+    r.direct = -1;
 }
 
 /* registers by address and data, as an A+D packet. count is at most 8 */
 void send_registers(Held &r, const uint64_t *values, const uint64_t *names, int count)
 {
-    if (count == 0 || queue_left(r) < static_cast<uint32_t>(count + 2) * 16) {
+    if (count == 0) {
         return;
     }
-    u64 *p = static_cast<u64 *>(gsKit_heap_alloc(r.gs, count, count * 16, GIF_AD));
+    u64 *p = gif(r, static_cast<uint32_t>(count) + 1);
 
     *p++ = GIF_TAG_AD(count);
     *p++ = GIF_AD;
@@ -405,6 +644,103 @@ bool highlights(const Draw &d)
     return d.offset && d.texture != nullptr && !d.decal && !d.blend;
 }
 
+/* the blocks a texture of w by h takes in the GS's memory. its pages,
+ * 64 by 32 texels at 32 bits and 64 by 64 at 16, lie in rows of TBW, and
+ * within a page its blocks lie out of order: a texture within one page
+ * takes the blocks to the last it reaches */
+uint32_t blocks_of(uint32_t w, uint32_t h, bool wide)
+{
+    static const uint8_t blocks32[4][8] = {{0, 1, 4, 5, 16, 17, 20, 21},
+                                           {2, 3, 6, 7, 18, 19, 22, 23},
+                                           {8, 9, 12, 13, 24, 25, 28, 29},
+                                           {10, 11, 14, 15, 26, 27, 30, 31}};
+    static const uint8_t blocks16[8][4] = {{0, 2, 8, 10},    {1, 3, 9, 11},    {4, 6, 12, 14},   {5, 7, 13, 15},
+                                           {16, 18, 24, 26}, {17, 19, 25, 27}, {20, 22, 28, 30}, {21, 23, 29, 31}};
+    uint32_t page_h = wide ? 32 : 64, block_w = wide ? 8 : 16;
+    uint32_t most = 0;
+
+    if (w >= 64 || h >= page_h) {
+        return (w + 63) / 64 * ((h + page_h - 1) / page_h) * 32;
+    }
+    for (uint32_t by = 0; by < (h + 7) / 8; by++) {
+        for (uint32_t bx = 0; bx < (w + block_w - 1) / block_w; bx++) {
+            most = std::max<uint32_t>(most, (wide ? blocks32[by][bx] : blocks16[by][bx]) + 1U);
+        }
+    }
+    return most;
+}
+
+/* the first place that holds blocks at align, or -1 */
+int32_t find_room(const Held &r, uint32_t blocks, uint32_t align)
+{
+    uint32_t at = r.vram_first;
+
+    for (const Texture *t : r.resident) {
+        uint32_t start = (at + align - 1) & ~(align - 1);
+
+        if (start + blocks <= static_cast<uint32_t>(t->block)) {
+            return static_cast<int32_t>(start);
+        }
+        at = std::max(at, static_cast<uint32_t>(t->block) + t->blocks);
+    }
+    at = (at + align - 1) & ~(align - 1);
+    return at + blocks <= VRAM_BLOCKS ? static_cast<int32_t>(at) : -1;
+}
+
+void unplace(Held &r, Texture *t)
+{
+    if (t->block >= 0) {
+        r.resident.erase(std::find(r.resident.begin(), r.resident.end(), t));
+        t->block = -1;
+    }
+}
+
+/* t in the GS's memory, its texels sent where it lies there no more: in
+ * the first room for it, made by putting out the textures bound longest
+ * ago. one bound earlier in the picture may go: the GS draws what used it
+ * before the texels over it come. false where it can't fit */
+bool place(Held &r, Texture *t)
+{
+    t->used = r.pictures;
+    if (t->block >= 0) {
+        return true;
+    }
+    uint32_t align = t->blocks >= 32 ? 32 : 1;
+    int32_t at;
+
+    while ((at = find_room(r, t->blocks, align)) < 0) {
+        Texture *oldest = nullptr;
+
+        for (Texture *o : r.resident) {
+            if (o != t && (oldest == nullptr || o->used < oldest->used)) {
+                oldest = o;
+            }
+        }
+        if (oldest == nullptr) {
+            return false;
+        }
+        unplace(r, oldest);
+    }
+    t->block = at;
+    r.resident.insert(std::upper_bound(r.resident.begin(), r.resident.end(), t,
+                                       [](const Texture *a, const Texture *b) { return a->block < b->block; }),
+                      t);
+    /* the transfer's registers, then the texels */
+    uint64_t values[4] = {GS_SETREG_BITBLTBUF(0, 0, 0, static_cast<uint32_t>(at), t->gs.TBW, t->gs.PSM),
+                          GS_SETREG_TRXPOS(0, 0, 0, 0, 0), GS_SETREG_TRXREG(t->gs.Width, t->gs.Height), 0};
+    uint64_t names[4] = {GS_BITBLTBUF, GS_TRXPOS, GS_TRXREG, GS_TRXDIR};
+    uint32_t bytes = t->gs.Width * t->gs.Height * (t->gs.PSM == GS_PSM_CT32 ? 4 : 2);
+
+    send_registers(r, values, names, 4);
+    send_texels(r, t->gs.Mem, (bytes + 15) / 16);
+    r.uploads.push_back(t);
+    r.sends++;
+    /* the GS reads the new texels after a TEXFLUSH, which the next TEX0
+     * sends */
+    r.tex0 = 0;
+    return true;
+}
+
 /* send what d changes of the registers. a texture binds first, which may
  * send its texels ahead of the draw. tfx overrides the draw's texture
  * function where it isn't -1 */
@@ -416,23 +752,22 @@ void apply(Held &r, const Draw &d)
 
     if (d.texture != nullptr) {
         Texture *t = const_cast<Texture *>(d.texture);
-        /* the bind answers whether it sent the texels: the texture's place
-         * in the GS's memory is its Vram, in bytes. the manager moves a
-         * texture only at a bind, so the texture last bound stays where it
-         * lies until another binds */
+        /* a texture moves only at a bind, so the texture last bound stays
+         * where it lies until another binds */
         if (t != r.bound) {
             uint32_t began = stamp();
 
-            r.sends += gsKit_TexManager_bind(r.gs, &t->gs) != 0;
+            if (!place(r, t)) {
+                fprintf(stderr, "sa1: a %ux%u texture is past the GS's memory\n", static_cast<unsigned>(t->gs.Width),
+                        static_cast<unsigned>(t->gs.Height));
+            }
             r.bind_us += stamp() - began;
             r.bound = t;
-            r.binds.push_back(t);
         }
-        unsigned int vram = t->gs.Vram;
+        unsigned int block = t->block >= 0 ? static_cast<unsigned>(t->block) : r.vram_first;
         int tfx = d.decal ? TFX_DECAL : highlights(d) ? TFX_HIGHLIGHT2 : TFX_MODULATE;
 
-        tex0 = GS_SETREG_TEX0(vram / 256, t->gs.TBW, t->gs.PSM, t->tw, t->th, d.alpha ? 1 : 0, tfx, 0, 0, 0, 0,
-                              0);
+        tex0 = GS_SETREG_TEX0(block, t->gs.TBW, t->gs.PSM, t->tw, t->th, d.alpha ? 1 : 0, tfx, 0, 0, 0, 0, 0);
     }
     tex1 = GS_SETREG_TEX1(0, 0, d.linear ? 1 : 0, d.linear ? 1 : 0, 0, 0, 0);
     clamp = GS_SETREG_CLAMP(d.clamp_u ? 1 : 0, d.clamp_v ? 1 : 0, 0, 0, 0, 0);
@@ -622,12 +957,8 @@ void send_packet(Held &r, const Draw &d, const Sent *pool, const uint32_t *index
         uint32_t words = take * static_cast<uint32_t>(regs);
         uint32_t qwords = (words + 1) / 2;
 
-        if (queue_left(r) < (qwords + 6) * 16) {
-            r.lost += (count - first) / 3;
-            return;
-        }
         set_prim(r, prim);
-        u64 *p = static_cast<u64 *>(gsKit_heap_alloc(r.gs, qwords, qwords * 16, GIF_AD));
+        u64 *p = gif(r, qwords + 1);
 
         *p++ = GIF_TAG(take, 1, 0, 0, GSKIT_GIF_FLG_REGLIST, regs);
         *p++ = names;
@@ -922,13 +1253,10 @@ void fill(Held &r, uint32_t argb, uint32_t z, uint64_t ztst, bool zwrite)
                           GS_SETREG_ZBUF(r.gs->ZBuffer / 8192, r.gs->PSMZ, zwrite ? 0 : 1)};
     uint64_t names[2] = {GS_TEST_1, GS_ZBUF_1};
 
-    if (queue_left(r) < 8 * 16) {
-        return;
-    }
     send_registers(r, values, names, 2);
     r.test = values[0];
     r.zbuf = values[1];
-    u64 *p = static_cast<u64 *>(gsKit_heap_alloc(r.gs, 3, 3 * 16, GIF_AD));
+    u64 *p = gif(r, 4);
 
     p[0] = GIF_TAG(1, 1, 1, GS_SETREG_PRIM(GS_PRIM_PRIM_SPRITE, 0, 0, 0, 0, 0, 0, 0, 0), GSKIT_GIF_FLG_PACKED,
                    3);
@@ -971,17 +1299,51 @@ void show_buffer(GSGLOBAL *gs, uint32_t buffer)
  * picture's end waits for the flip only where it comes before the blank,
  * so the EE waits for the display only when it draws faster than it shows.
  * the GS's display circuits show from the blank, so no picture tears */
-volatile int32_t flip_pending = -1;
 GSGLOBAL *flip_gs;
 
 int flip_at_blank(int)
 {
-    if (flip_pending >= 0 && flip_gs != nullptr) {
+    /* the GS's FINISH says it drew the picture's last command */
+    if (flip_pending >= 0 && flip_gs != nullptr && (*GS_CSR & 2) != 0) {
         show_buffer(flip_gs, static_cast<uint32_t>(flip_pending));
         flip_pending = -1;
     }
     ExitHandler();
     return 0;
+}
+
+/* VU1's program (engine/ps2/strip.vsm), and its two batches' buffers, by
+ * a transfer of their own before the first picture's */
+void open_vu(Held &r)
+{
+    const uint32_t *code = &VU1Strip_CodeStart;
+    uint32_t dwords = static_cast<uint32_t>(&VU1Strip_CodeEnd - &VU1Strip_CodeStart) / 2;
+    uint32_t *w = r.stream[0];
+    uint32_t at = 0;
+
+    for (uint32_t done = 0; done < dwords;) {
+        uint32_t n = std::min<uint32_t>(dwords - done, 256);
+
+        /* MPG's code starts at a doubleword's start */
+        while (at % 2 != 1) {
+            w[at++] = 0;
+        }
+        w[at++] = vif_code(VIF_MPG, n & 0xff, done);
+        memcpy(w + at, code + done * 2, n * 8);
+        at += n * 2;
+        done += n;
+    }
+    w[at++] = vif_code(VIF_BASE, 0, VU_BASE);
+    w[at++] = vif_code(VIF_OFFSET, 0, VU_OFFSET);
+    w[at++] = vif_code(VIF_STCYCL, 0, 1 | 1 << 8);
+    while (at % 4 != 0) {
+        w[at++] = 0;
+    }
+    FlushCache(0);
+    *D1_MADR = physical(w);
+    *D1_QWC = at / 4;
+    *D1_CHCR = 0x101; /* from memory, at once */
+    vif_wait();
 }
 
 void open_screen(Held &r)
@@ -991,7 +1353,8 @@ void open_screen(Held &r)
     dmaKit_init(D_CTRL_RELE_OFF, D_CTRL_MFD_OFF, D_CTRL_STS_UNSPEC, D_CTRL_STD_OFF, D_CTRL_RCYC_8,
                 1 << DMA_CHANNEL_GIF);
     dmaKit_chan_init(DMA_CHANNEL_GIF);
-    gs = gsKit_init_global_custom(QUEUE_BYTES, GS_RENDER_QUEUE_PER_POOLSIZE);
+    /* gsKit's queue takes only its own setup's commands */
+    gs = gsKit_init_global_custom(1 << 16, GS_RENDER_QUEUE_PER_POOLSIZE);
     /* 480p, or 480i: the game's pixels map one to one either way, 480i's
      * cropped to its 448 lines (crop) */
     gs->Mode = ps2_interlaced ? GS_MODE_NTSC : GS_MODE_DTV_480P;
@@ -1013,7 +1376,8 @@ void open_screen(Held &r)
     gs->Dithering = ps2_dither ? GS_SETTING_ON : GS_SETTING_OFF;
     gsKit_init_screen(gs);
     gsKit_mode_switch(gs, GS_ONESHOT);
-    gsKit_TexManager_init(gs);
+    gsKit_queue_exec(gs);
+    dmaKit_wait(DMA_CHANNEL_GIF, 0);
     /* the first picture draws into buffer 0 while 1 shows. gsKit's own
      * flip, which waits for the blank, goes unused */
     r.draw_buffer = 0;
@@ -1021,10 +1385,16 @@ void open_screen(Held &r)
     flip_gs = gs;
     gsKit_add_vsync_handler(flip_at_blank);
     r.gs = gs;
+    r.vram_first = (gs->CurrentPointer + 255) / 256;
     r.kept = static_cast<psp_corner *>(memalign(64, KEPT_CORNERS * sizeof(psp_corner)));
+    r.stream[0] = static_cast<uint32_t *>(memalign(64, STREAM_QWORDS * 16));
+    r.stream[1] = static_cast<uint32_t *>(memalign(64, STREAM_QWORDS * 16));
     r.blends.reserve(BLENDS_MOST);
     r.blend_corners.reserve(3 * BLENDS_MOST);
-    r.opened = r.kept != nullptr;
+    r.opened = r.kept != nullptr && r.stream[0] != nullptr && r.stream[1] != nullptr;
+    if (r.opened) {
+        open_vu(r);
+    }
     fprintf(stderr, "sa1: the GS's screen is %dx%d, %s, %u bytes of its memory free for textures\n", SCREEN_W,
             screen_height(), ps2_interlaced ? (ps2_deflicker ? "480i, its flicker filtered" : "480i") : "480p",
             4U * 1024 * 1024 - gs->CurrentPointer);
@@ -1069,18 +1439,21 @@ void read_fog(Held &r)
     }
 }
 
-/* take back the open picture's commands: what they would have sent of a
- * texture's texels goes unsent, so the manager sends it at its next bind */
+/* take back the open picture's unsent commands: what they would have sent
+ * of a texture's texels goes unsent, so its next bind sends it */
 void take_back(Held &r)
 {
     r.taken_back++;
-    gsKit_queue_reset(r.gs->CurQueue);
-    for (Texture *t : r.binds) {
-        gsKit_TexManager_invalidate(r.gs, &t->gs);
+    r.at = 0;
+    r.tag = -1;
+    r.direct = -1;
+    for (Texture *t : r.uploads) {
+        unplace(r, t);
     }
-    r.binds.clear();
+    r.uploads.clear();
     r.bound = nullptr;
     r.sent = false;
+    r.vu_fog = false;
 }
 
 /* open a picture's commands over a screen cleared to black and the
@@ -1092,7 +1465,7 @@ void open_picture(Held &r)
     }
     r.sent = false;
     r.bound = nullptr;
-    r.binds.clear();
+    r.vu_fog = false;
     read_fog(r);
     {
         /* the alpha bits of a 16-bit texel, clear and solid, and the fog's
@@ -1178,6 +1551,7 @@ Texture *mirrored(Held &r, Texture *t, int flip)
     made->tw = static_cast<uint8_t>(side_log2(w2));
     made->th = static_cast<uint8_t>(side_log2(h2));
     made->cuts = t->cuts;
+    made->blocks = blocks_of(w2, h2, made->gs.PSM == GS_PSM_CT32);
     FlushCache(0);
     r.texture_bytes += w2 * h2 * texel;
     r.mirrors++;
@@ -1234,13 +1608,9 @@ bool send_strip(Held &r, const Draw &d, const Screen &s, const Corner *corners, 
     uint32_t words = count * static_cast<uint32_t>(regs);
     uint32_t qwords = (words + 1) / 2;
 
-    if (queue_left(r) < (qwords + 8) * 16) {
-        r.lost += count - 2;
-        return true;
-    }
     apply(r, d);
     set_prim(r, GS_SETREG_PRIM(GS_PRIM_PRIM_TRISTRIP, 1, textured ? 1 : 0, fogged ? 1 : 0, 0, 0, 0, 0, 0));
-    u64 *p = static_cast<u64 *>(gsKit_heap_alloc(r.gs, qwords, qwords * 16, GIF_AD));
+    u64 *p = gif(r, qwords + 1);
 
     *p++ = GIF_TAG(count, 1, 0, 0, GSKIT_GIF_FLG_REGLIST, regs);
     *p++ = textured ? (GS_RGBAQ | GS_ST << 4 | GS_XYZF2_REG << 8) : (GS_RGBAQ | GS_XYZF2_REG << 4);
@@ -1274,6 +1644,221 @@ bool send_strip(Held &r, const Draw &d, const Screen &s, const Corner *corners, 
     return true;
 }
 
+/* whether every point of a strip lies within every side, by the eight
+ * corners of the box of its points in the model's space: each side is a
+ * plane, so what lies between corners within lies within */
+/* the EE's FPU's own least and most of two, without a branch */
+inline float least(float a, float b)
+{
+    float m;
+
+    __asm__("min.s %0, %1, %2" : "=f"(m) : "f"(a), "f"(b));
+    return m;
+}
+
+inline float most(float a, float b)
+{
+    float m;
+
+    __asm__("max.s %0, %1, %2" : "=f"(m) : "f"(a), "f"(b));
+    return m;
+}
+
+static_assert(sizeof(psp_corner) == 24, "send_vu reads a corner as six words");
+
+/* where a strip's box lies: within every side, past one side whole, or
+ * across a side */
+enum class Box { INSIDE, OUTSIDE, ACROSS };
+
+Box box_of(const Placed &placed, const Screen &s, const psp_corner *corners, uint32_t count)
+{
+    const float *m = placed.matrix;
+    float lo[3] = {corners[0].x, corners[0].y, corners[0].z};
+    float hi[3] = {lo[0], lo[1], lo[2]};
+
+    for (uint32_t i = 1; i < count; i++) {
+        const psp_corner &c = corners[i];
+
+        lo[0] = least(lo[0], c.x);
+        hi[0] = most(hi[0], c.x);
+        lo[1] = least(lo[1], c.y);
+        hi[1] = most(hi[1], c.y);
+        lo[2] = least(lo[2], c.z);
+        hi[2] = most(hi[2], c.z);
+    }
+    /* the sides every corner lies past, and those any does */
+    uint32_t every = 31, any = 0;
+
+    for (int k = 0; k < 8; k++) {
+        float x = (k & 1) != 0 ? hi[0] : lo[0];
+        float y = (k & 2) != 0 ? hi[1] : lo[1];
+        float z = (k & 4) != 0 ? hi[2] : lo[2];
+        Corner v;
+
+        v.x = x * m[0] + y * m[4] + z * m[8] + m[12];
+        v.y = x * m[1] + y * m[5] + z * m[9] + m[13];
+        v.z = x * m[2] + y * m[6] + z * m[10] + m[14];
+        uint32_t past = outside(s, v);
+
+        every &= past;
+        any |= past;
+    }
+    return every != 0 ? Box::OUTSIDE : any != 0 ? Box::ACROSS : Box::INSIDE;
+}
+
+/* the picture's fog table to VU1, once its batches before are done: for
+ * each step of the square root of 1/z times the density, the GS's fog at
+ * the step's middle */
+void send_vu_fog(Held &r)
+{
+    room(r, 8 + VU_FOG * 4);
+    close_direct(r);
+    put(r, vif_code(VIF_FLUSHE, 0, 0));
+    while (r.at % 4 != 3) {
+        put(r, 0);
+    }
+    put(r, vif_code(UNPACK_V4_32, VU_FOG, 0));
+    float *f = reinterpret_cast<float *>(words(r) + r.at);
+
+    for (uint32_t i = 0; i < VU_FOG; i++) {
+        float root = (static_cast<float>(i) + 0.5F) * 0.25F;
+        float alpha = fog_alpha(r.fog, r.fog.density != 0.0F ? root * root / r.fog.density : 0.0F);
+
+        alpha = alpha < 0.0F ? 0.0F : alpha > 1.0F ? 1.0F : alpha;
+        f[4 * i] = 255.0F - alpha * 255.0F;
+        f[4 * i + 1] = f[4 * i + 2] = f[4 * i + 3] = 0.0F;
+    }
+    r.at += VU_FOG * 4;
+    r.vu_fog = true;
+}
+
+/* an opaque strip within every side, by VU1: batches of VU_CORNERS
+ * corners at most, each after the last's last two, each with its head of
+ * the place, the screen and the draw's terms (engine/ps2/strip.vsm). the
+ * VIF unpacks each corner's point, its u and v, its color and its offset
+ * as the corner holds them, four qwords apart. VU1 culls as d says, each
+ * triangle by the strip's first's turn, or the other where reversed: a
+ * batch starts at an even triangle, so each batch's first turns as the
+ * strip's */
+void send_vu(Held &r, const Draw &d, const Placed &placed, const psp_corner *corners, uint32_t count, bool reversed)
+{
+    float turn = d.cull == 1 ? 1.0F : d.cull == 2 ? -1.0F : 0.0F;
+
+    bool textured = d.texture != nullptr, fogged = d.fog != SA_FOG_NONE, high = highlights(d);
+    float scale = textured && !d.decal ? 128.0F / 255.0F : 1.0F;
+    float su = textured ? d.texture->su / 255.0F : 0.0F, sv = textured ? d.texture->sv / 255.0F : 0.0F;
+    uint64_t prim = GS_SETREG_PRIM(GS_PRIM_PRIM_TRISTRIP, 1, textured ? 1 : 0, fogged ? 1 : 0, 0, 0, 0, 0, 0);
+    uint64_t regs = GS_ST | GS_RGBAQ << 4 | GS_XYZF2_REG << 8;
+
+    apply(r, d);
+    if (fogged && !r.vu_fog) {
+        send_vu_fog(r);
+    }
+    for (uint32_t first = 0; first + 2 < count; first += VU_CORNERS - 2) {
+        uint32_t n = std::min(count - first, VU_CORNERS);
+        const psp_corner *c = corners + first;
+
+        room(r, 64 + 6 * n);
+        close_direct(r);
+        while (r.at % 4 != 3) {
+            put(r, 0);
+        }
+        put(r, vif_code(UNPACK_V4_32, 12, UNPACK_TOPS));
+        uint32_t *w = words(r) + r.at;
+        u64 *tag = reinterpret_cast<u64 *>(w);
+        float *h = reinterpret_cast<float *>(w);
+
+        tag[0] = GIF_TAG(n, 1, 1, prim, GSKIT_GIF_FLG_PACKED, 3);
+        tag[1] = regs;
+        w[4] = n;
+        h[5] = 0.0F;
+        h[6] = reversed ? -turn : turn;
+        h[7] = 2048.0F;
+        memcpy(h + 8, placed.matrix, 16 * sizeof(float));
+        h[24] = placed.screen[0];
+        h[25] = placed.screen[1];
+        h[26] = DEPTH_MOST;
+        h[27] = 0.0F;
+        h[28] = placed.screen[2] + static_cast<float>(r.gs->OffsetX) / 16.0F;
+        h[29] = placed.screen[3] - crop() + static_cast<float>(r.gs->OffsetY) / 16.0F;
+        h[30] = h[31] = 0.0F;
+        h[32] = h[33] = h[34] = scale;
+        h[35] = 128.0F / 255.0F;
+        h[36] = su;
+        h[37] = sv;
+        h[38] = h[39] = 0.0F;
+        h[40] = r.fog.density;
+        h[41] = fogged ? 1.0F : 0.0F;
+        h[42] = 1e30F;
+        h[43] = high ? 1.0F : 0.0F;
+        h[44] = 4.0F;
+        h[45] = 255.99F;
+        h[46] = fogged ? 0.0F : 255.0F;
+        h[47] = high ? 0.0F : 1.0F;
+        r.at += 48;
+        put(r, vif_code(VIF_STCYCL, 0, 4 | 1 << 8));
+        {
+            /* the four fields' unpacks, each its code and its n words or
+             * 3n, written in one pass over the corners: a corner's words
+             * are u and v, the color, the point's three and the offset */
+            typedef uint32_t word __attribute__((may_alias));
+            word *out = words(r);
+            const word *from = reinterpret_cast<const word *>(c);
+            uint32_t at = r.at;
+            uint32_t points = at + 1, uvs = points + 3 * n + 1, colors = uvs + n + 1, offsets = colors + n + 1;
+
+            out[at] = vif_code(UNPACK_V3_32, n, UNPACK_TOPS | 12);
+            out[uvs - 1] = vif_code(UNPACK_V2_16, n, UNPACK_TOPS | 13);
+            out[colors - 1] = vif_code(UNPACK_V4_8, n, UNPACK_TOPS | UNPACK_USN | 14);
+            out[offsets - 1] = vif_code(UNPACK_V4_8, n, UNPACK_TOPS | UNPACK_USN | 15);
+            for (uint32_t i = 0; i < n; i++, from += 6) {
+                uint32_t uv = from[0], color = from[1], x = from[2], y = from[3], z = from[4], offset = from[5];
+
+                out[points + 3 * i] = x;
+                out[points + 3 * i + 1] = y;
+                out[points + 3 * i + 2] = z;
+                out[uvs + i] = uv;
+                out[colors + i] = color;
+                out[offsets + i] = offset;
+            }
+            r.at = offsets + n;
+        }
+        put(r, vif_code(VIF_STCYCL, 0, 1 | 1 << 8));
+        put(r, vif_code(VIF_MSCAL, 0, 0));
+        r.vu_since = true;
+        r.triangles += n - 2;
+        r.vu_triangles += n - 2;
+        r.vu_batches++;
+        if (first + n >= count) {
+            break;
+        }
+    }
+}
+
+/* a strip whose box lies wholly past a side draws nothing, and an opaque
+ * strip within every side goes to VU1, but under fog by its points, whose
+ * fog VU1's program leaves out. false where the EE must draw it */
+bool vu_strip(Held &r, const Placed &placed, const Draw &d, const psp_corner *corners, uint32_t count,
+              bool reversed)
+{
+    Screen s = {placed.screen[0], placed.screen[1], placed.screen[2], placed.screen[3]};
+
+    if (!ps2_vu || count < 3) {
+        return false;
+    }
+    Box box = box_of(placed, s, corners, count);
+
+    if (box == Box::OUTSIDE) {
+        r.strips_past++;
+        return true;
+    }
+    if (box == Box::ACROSS || d.blend || d.fog == SA_FOG_VERTEX) {
+        return false;
+    }
+    send_vu(r, d, placed, corners, count, reversed);
+    return true;
+}
+
 /* a strip's or a list's corners under a place and screen, to view space and
  * the GS. each corner goes to view space once, and the triangles name them
  * by index: a strip's turn by turns, so each odd one goes reversed and
@@ -1294,6 +1879,10 @@ void send_corners(Held &r, const Placed &placed, const psp_state &state, const p
     }
     uint32_t began = stamp();
 
+    if (!triangles && vu_strip(r, placed, d, corners, count, false)) {
+        r.strip_us += stamp() - began;
+        return;
+    }
     in.resize(count);
     for (uint32_t i = 0; i < count; i++) {
         const psp_corner &p = corners[i];
@@ -1375,6 +1964,7 @@ uint32_t add_texels(Held &r, const ps2::TexelsHead &head, void *texels)
     made->tw = head.tw;
     made->th = head.th;
     made->cuts = head.cuts != 0;
+    made->blocks = blocks_of(pw, ph, made->gs.PSM == GS_PSM_CT32);
     if (head.bytes > 512 * 1024) {
         fprintf(stderr, "sa1: a large texture, %ux%u at %u bits: %u bytes\n", static_cast<unsigned>(head.width),
                 static_cast<unsigned>(head.height), head.psm == ps2::PSM_32 ? 32U : 16U,
@@ -1415,11 +2005,23 @@ uint32_t add_image(Held &r, const Image &image)
     return added;
 }
 
+/* a texture dropped: a stream unsent or sending may still send its texels,
+ * so they're freed once it's sent */
 void drop_texture(Held &r, Texture *t)
 {
-    gsKit_TexManager_free(r.gs, &t->gs);
+    auto unsent = std::find(r.uploads.begin(), r.uploads.end(), t);
+    bool sending = unsent != r.uploads.end() || (*D1_CHCR & CHCR_STR) != 0;
+
+    unplace(r, t);
+    if (unsent != r.uploads.end()) {
+        r.uploads.erase(unsent);
+    }
     r.texture_bytes -= t->gs.Width * t->gs.Height * (t->gs.PSM == GS_PSM_CT32 ? 4 : 2);
-    free(t->gs.Mem);
+    if (sending) {
+        r.dying.push_back(t->gs.Mem);
+    } else {
+        free(t->gs.Mem);
+    }
     delete t;
 }
 
@@ -1559,18 +2161,19 @@ bool psp_submit(const PictureUniform &picture, uint32_t clear, const std::vector
     if (!blends_drawn) {
         draw_blends(r);
     }
-    r.most_queue = std::max<uint32_t>(r.most_queue, QUEUE_BYTES - queue_left(r));
+    {
+        /* the GS's FINISH, once it drew all before */
+        uint64_t value = 0, name = GS_FINISH;
+
+        send_registers(r, &value, &name, 1);
+    }
     uint32_t made = sceKernelGetSystemTimeLow();
 
     /* the last picture's flip first: its buffer is the one this picture's
      * commands draw into while it shows, until the blank */
-    while (flip_pending >= 0) {
-    }
-    gsKit_queue_exec(r.gs);
+    send_stream(r, true);
     flip_pending = static_cast<int32_t>(r.draw_buffer);
     r.draw_buffer ^= 1;
-    gsKit_TexManager_nextFrame(r.gs);
-    r.binds.clear();
     r.bound = nullptr;
     uint32_t shown = sceKernelGetSystemTimeLow();
 
@@ -1598,18 +2201,22 @@ bool psp_submit(const PictureUniform &picture, uint32_t clear, const std::vector
         fprintf(stderr,
                 "sa1: the GS's last %u pictures: %u triangles, %u us on the EE, %u of them the raster's "
                 "strips, %u its binds, which sent %u textures, %u the walk's textures and %u its points' "
-                "light, and %u us on the GS each; %u bytes of the heap in use, %u of them textures; %u "
-                "pictures taken back\n",
+                "light, and %u us on the GS each; %u of VU1's batches, %u triangles, %u strips dropped whole; %u "
+                "bytes of the heap in use, %u of "
+                "them textures; %u pictures taken back\n",
                 static_cast<unsigned>(r.timed), static_cast<unsigned>(r.triangles / r.timed),
                 static_cast<unsigned>(r.make_us / r.timed), static_cast<unsigned>(r.strip_us / r.timed),
                 static_cast<unsigned>(r.bind_us / r.timed), static_cast<unsigned>(r.sends / r.timed),
                 static_cast<unsigned>(ps2_walk_load_us / r.timed), static_cast<unsigned>(ps2_walk_light_us / r.timed),
-                static_cast<unsigned>(r.gs_us / r.timed), static_cast<unsigned>(mallinfo().uordblks),
+                static_cast<unsigned>(r.gs_us / r.timed), static_cast<unsigned>(r.vu_batches / r.timed),
+                static_cast<unsigned>(r.vu_triangles / r.timed), static_cast<unsigned>(r.strips_past / r.timed),
+                static_cast<unsigned>(mallinfo().uordblks),
                 static_cast<unsigned>(r.texture_bytes), static_cast<unsigned>(r.taken_back));
         r.taken_back = 0;
         ps2_walk_load_us = ps2_walk_light_us = 0;
         r.bind_us = 0;
         r.sends = 0;
+        r.vu_batches = r.vu_triangles = r.strips_past = 0;
         r.timed = r.triangles = 0;
         r.make_us = r.gs_us = r.strip_us = 0;
     }
@@ -1802,6 +2409,16 @@ extern "C" void psp_draw_cut(const struct psp_corner *corners, uint32_t count, i
 
     if (!r.picture || count < 3) {
         return;
+    }
+    /* most such strips lie within every side all the same */
+    if (later == nullptr) {
+        uint32_t began = stamp();
+        bool drawn = pc::vu_strip(r, r.place, pc::draw_of(r, r.state), corners, count, reversed != 0);
+
+        r.strip_us += stamp() - began;
+        if (drawn) {
+            return;
+        }
     }
     for (uint32_t i = 0; i + 2 < count; i++) {
         bool flip = ((i & 1) != 0) != (reversed != 0);

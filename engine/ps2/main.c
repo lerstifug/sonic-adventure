@@ -66,6 +66,8 @@ int ps2_dither = 1;
 /* profile 1: the raster times its strips and binds, and the walk its
  * points' light, one by one */
 int ps2_profile = 0;
+/* vu 0 draws every strip on the EE, as before VU1 drew the opaque ones */
+int ps2_vu = 1;
 /* the sampling profiler's (engine/ps2/profile.c) */
 static int sampling;
 void ps2_profile_start(void);
@@ -221,6 +223,10 @@ static int take_target(const char *name, const char *value)
     }
     if (!strcmp(name, "profile")) {
         ps2_profile = atoi(value);
+        return 1;
+    }
+    if (!strcmp(name, "vu")) {
+        ps2_vu = atoi(value);
         return 1;
     }
     /* sample 1: the sampling profiler (profile.c) */

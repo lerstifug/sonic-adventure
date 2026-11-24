@@ -9,13 +9,15 @@
 ; (VIF's BASE and OFFSET), and XTOP gives this batch's:
 ;
 ;   0       the GIF tag of the strip: PRE, PRIM, PACKED, ST RGBAQ XYZF2
-;   1       x: the corners' count, an integer
+;   1       x: the corners' count, an integer; y 0; z the cull's turn, 1
+;           to drop a triangle of the strip's first turn, -1 the other's,
+;           0 none; w 2048, the ADC bit of XYZF2's fourth word over 16
 ;   2-5     the model's matrix, Ninja's rows: a point is a row times it
 ;   6       the screen's scale: focal x, focal y, the depth's most, 0
 ;   7       its bias: center x and y, as the GS's pixels place them
 ;   8       the color's scale: red, green, blue and alpha's, each of 1
 ;   9       the texture's scale: u and v of the stored sides, over 255
-;   10      density, fogged (0 or 1), 0, highlighted (0 or 1)
+;   10      density, fogged (0 or 1), 1e30, highlighted (0 or 1)
 ;   11      4.0, 255.99, 255 times one less fogged, one less highlighted
 ;   12-     the corners, four qwords each, as the VIF unpacks them: the
 ;           point (x, y, z floats), u and v (integers), the color (red,
@@ -23,6 +25,12 @@
 ;   12+4n   the strip as the GS takes it: the GIF tag, then for each
 ;           corner ST (with Q), RGBAQ and XYZF2: RGBAQ takes the Q of the ST
 ;           before it, so ST goes first
+;
+; a triangle the cull drops still goes, its last corner's XYZF2 with the ADC
+; bit, which the GS takes as XYZF3: the corner joins the strip and draws
+; nothing. the turn alternates corner by corner, from the third: VF25's x
+; is the corner's, 0 for the first two, y the next's and z the one after.
+; VF22 and VF23 hold the last two corners' pixels
 ;
 ; written for clarity over speed: the VU stalls on each FMAC result a later
 ; instruction reads, and WAITQ takes each division and square root
@@ -45,7 +53,11 @@ VU1Strip_CodeStart:
         NOP                     lq VF09, 10(VI02)
         NOP                     lq VF20, 11(VI02)
         NOP                     lq VF21, 0(VI02)
+        NOP                     lq VF25, 1(VI02)
+        sub.xy VF22, VF00, VF00 NOP
+        sub.xy VF23, VF00, VF00 NOP
         NOP                     iaddiu VI04, VI02, 12
+        sub.x VF25, VF25, VF25  NOP
         NOP                     iadd VI05, VI03, VI03
         NOP                     iadd VI05, VI05, VI05
         NOP                     iadd VI05, VI05, VI04
@@ -81,6 +93,21 @@ strip_corner:
         mulq.z VF15, VF05, Q    NOP
         mulq.x VF16, VF09, Q    NOP
         add.xy VF15, VF15, VF06 NOP
+        sub.xy VF26, VF23, VF22 NOP
+        sub.xy VF27, VF15, VF22 NOP
+        add.xy VF22, VF00, VF23 NOP
+        add.xy VF23, VF00, VF15 NOP
+        muly.x VF28, VF26, VF27y NOP
+        mulx.y VF28, VF26, VF27x NOP
+        suby.x VF28, VF28, VF28y NOP
+        mulx.x VF28, VF28, VF25x NOP
+        mulz.x VF28, VF28, VF09z NOP
+        maxx.x VF28, VF28, VF00x NOP
+        miniw.x VF28, VF28, VF00w NOP
+        mulx.w VF28, VF25, VF28x NOP
+        addy.x VF25, VF00, VF25y NOP
+        addz.y VF25, VF00, VF25z NOP
+        subz.z VF25, VF00, VF25z NOP
         ftoi0 VF13, VF13        NOP
         maxw.x VF16, VF16, VF00w NOP
         miniy.x VF16, VF16, VF20y NOP
@@ -120,6 +147,7 @@ strip_corner:
         NOP                     NOP
         subw.w VF15, VF15, VF00w NOP
         subw.w VF15, VF15, VF00w NOP
+        add.w VF15, VF15, VF28  NOP
         NOP                     NOP
         NOP                     NOP
         NOP                     NOP
