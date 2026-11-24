@@ -255,6 +255,7 @@ void native_vsync(void)
     if (native_pace) {
         native_pace();
     }
+    native_pads_vsync();
     if (vsync_function) {
         vsync_function();
     }

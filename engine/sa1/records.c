@@ -2486,6 +2486,13 @@ void sa1_record_screen_strip(const void *vertices, int count, int textured,
         }
         points[i].at[1] = textured ? t->y : v->y;
         points[i].at[2] = ooz > 0.0F ? (float)(1.0 / (double)ooz) : 1.0F;
+        /* a 1/z over 1 is nearer than the near plane, where the backend
+         * clips it. the pause menu's tiles, shadows and banner are 9, 10 and
+         * 11, so none showed. such a depth goes beyond the plane, in the
+         * same order, as 1 + z, so the nearer of two stays the nearer */
+        if (points[i].at[2] < 1.0F) {
+            points[i].at[2] += 1.0F;
+        }
         points[i].uv[0] = textured ? t->u : 0.0F;
         points[i].uv[1] = textured ? t->v : 0.0F;
         points[i].color = textured ? t->col : v->col;

@@ -61,11 +61,23 @@ static void next_keys(void)
 
 void (*native_pad_read)(void *pad);
 
-void __wrap_pad_scan(void)
+/* the live pad's record is read once for each vsync, as the Dreamcast's
+ * library does. its press then lasts the one vsync, however many times or
+ * few the game scans in it. read at each scan, a press stayed in the record
+ * until the next scan, and the game, which takes the record's press before
+ * it scans, saw the press that closed its pause menu again, and paused */
+void native_pads_vsync(void)
 {
     if (native_pad_read && pad_record) {
         native_pad_read(pad_record);
         sa1_chord(pad_record);
+    }
+}
+
+void __wrap_pad_scan(void)
+{
+    if (native_pad_read && pad_record) {
+        /* the record holds the vsync's read */
     } else if (pad_record && !native_hook_pads()) {
         next_keys();
         sa1_chord(pad_record);

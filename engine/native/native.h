@@ -177,6 +177,8 @@ struct native_pad {
 /* the shim gives pads.c the first pad's record. native_keys_open opens a
  * script of keys to play, and sets native_scripted */
 void native_pad_record(void *pad);
+/* read the live pad into the record, once for each vsync */
+void native_pads_vsync(void);
 void native_keys_open(const char *path);
 extern int native_scripted;
 /* read the program's own symbols, once. it returns 0 once they are read.
