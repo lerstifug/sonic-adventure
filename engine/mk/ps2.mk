@@ -297,6 +297,21 @@ $(PS2)/game/textures.pak: $(PS2)/textures_pack SHA256SUMS
 	$(Q)$< $(abspath orig) $(abspath $(@D))
 $(PS2)/game/textures.bin: $(PS2)/game/textures.pak
 ps2: $(PS2)/game/SONICADV.ELF $(PS2)/game/textures.pak
+# And the disc's textures as TIM2 files in the GS's own formats, one for
+# each name of the disc's texture files, game/textures/NAME.tm2, with a
+# report of what each texture became (engine/ps2/TEXTURES.md,
+# engine/tools/textures_tm2.cpp). the tool rewrites only the files whose
+# bytes change, so a copy takes only those
+PS2_TM2_SOURCES := engine/tools/textures_tm2.cpp engine/pc/pvr.cpp engine/pc/disc.cpp
+$(PS2)/textures_tm2: $(PS2_TM2_SOURCES) engine/pc/pvr.h engine/pc/disc.h engine/ps2/texels.h engine/ps2/tim2.h \
+		$(PS2_NEEDS)
+	@$(call status,c++,$@)
+	$(Q)mkdir -p $(@D)
+	$(Q)$(CXX) $(PS2_PACK_FLAGS) -o $@ $(PS2_TM2_SOURCES)
+$(PS2)/game/textures/report.csv: $(PS2)/textures_tm2 SHA256SUMS
+	@$(call status,tm2,$(@D))
+	$(Q)$< $(abspath orig) $(abspath $(PS2)/game)
+ps2: $(PS2)/game/textures/report.csv
 
 # PS2_OUT, from the environment, puts the slice's objects and links outside
 # the tree: on WSL, its own filesystem, where a file's every open and read
@@ -308,7 +323,12 @@ ps2: $(PS2)/game/SONICADV.ELF $(PS2)/game/textures.pak
 # the tree on WSL's own filesystem, into the Windows tree's folder
 PS2_RUN ?= build/engine/ps2/game
 ifneq ($(abspath $(PS2)),$(abspath build/engine/ps2))
-ps2: $(PS2_RUN)/SONICADV.ELF $(PS2_RUN)/textures.pak
+ps2: $(PS2_RUN)/SONICADV.ELF $(PS2_RUN)/textures.pak $(PS2_RUN)/textures/report.csv
+$(PS2_RUN)/textures/report.csv: $(PS2)/game/textures/report.csv
+	@$(call status,copy,$(@D))
+	$(Q)mkdir -p $(@D)
+	$(Q)cp -u $(PS2)/game/textures/*.tm2 $(@D)/
+	$(Q)cp $< $@
 $(PS2_RUN)/SONICADV.ELF: $(PS2)/game/SONICADV.ELF
 	@$(call status,copy,$(PS2_RUN))
 	$(Q)mkdir -p $(PS2_RUN)/programs
