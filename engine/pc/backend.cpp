@@ -482,7 +482,7 @@ void sleep_until(uint64_t time_ns)
 {
     timespec t;
 
-#ifdef __PSP__
+#ifdef SA_SMALL
     uint64_t now = now_ns();
 
     if (now >= time_ns) {
@@ -666,7 +666,7 @@ sa_result backend_create(sa_engine &engine)
         pc::window_close(window);
         return SA_ERR_UNSUPPORTED;
     }
-#ifndef __PSP__
+#ifndef SA_SMALL
     /* the PSP's adapter draws as the game calls (engine/psp/draw.h), and
      * the engine's scene stays shut: no picture comes by sa_present_begin */
     made->scene.open(options->blend, made->raster.reach());
@@ -678,7 +678,7 @@ sa_result backend_create(sa_engine &engine)
          * picture's releases */
         made->world.open(engine.desc.events);
     }
-#ifdef __PSP__
+#ifdef SA_SMALL
     /* the PSP has no memory to spare for a sound nothing hears */
     made->sound_made =
         (options->flags & SA_PC_SOUND) != 0 && made->sound.create();
@@ -809,7 +809,7 @@ sa_result sa_audio_stream(sa_engine *engine, uint32_t stream, const void *data,
                         : SA_ERR_UNSUPPORTED;
 }
 
-#ifdef __PSP__
+#ifdef SA_SMALL
 sa_result sa_pc_audio_stream_file(sa_engine *engine, uint32_t stream,
                                   FILE *file, uint32_t base, uint32_t size,
                                   const void *head, uint32_t bytes)
@@ -892,7 +892,7 @@ sa_result sa_resource_create(sa_engine *engine, const sa_resource_desc *desc,
         break;
     }
     case SA_FORMAT_PVR:
-#ifdef __PSP__
+#ifdef SA_SMALL
         /* the PSP's raster makes the texture of the PVR's bytes, below */
         if (desc->kind != SA_KIND_TEXTURE) {
             return SA_ERR_INVALID;
@@ -934,7 +934,7 @@ sa_result sa_resource_create(sa_engine *engine, const sa_resource_desc *desc,
     if (desc->kind == SA_KIND_TEXTURE) {
         std::string why;
 
-#ifdef __PSP__
+#ifdef SA_SMALL
         bool tried = true;
 
         if (desc->format == SA_FORMAT_PVR) {

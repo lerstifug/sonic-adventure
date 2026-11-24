@@ -29,6 +29,17 @@
                  MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)           \
          ? 0                                                                   \
          : -1)
+#elif defined(_EE)
+/* the PS2's devices, PCSX2's host: among them, may take no fsync and no
+ * rename over a file that exists. a write there makes its new file as
+ * elsewhere, and where the rename fails, the save goes first and the rename
+ * goes again, or else the new file's bytes are copied over the save */
+#define FLAGS 0
+#define SLASHES "/"
+#define make_directory(path) mkdir(path, 0755)
+#define fsync(fd) 0
+#define take_place(fresh, name) placed_over(fresh, name)
+#define LACKS_RENAME_OVER 1
 #else
 /* the PSP runs no second program, so its files have no such flag */
 #ifdef O_CLOEXEC
@@ -44,6 +55,56 @@
 #include "runtime.h"
 
 namespace {
+
+#ifdef LACKS_RENAME_OVER
+int placed_over(const char *fresh, const char *name)
+{
+    char block[4096];
+    size_t got;
+    bool whole = true;
+    FILE *in, *out;
+
+    if (rename(fresh, name) == 0) {
+        return 0;
+    }
+    remove(name);
+    if (rename(fresh, name) == 0) {
+        return 0;
+    }
+    if (!(in = fopen(fresh, "rb"))) {
+        return -1;
+    }
+    if (!(out = fopen(name, "wb"))) {
+        fclose(in);
+        return -1;
+    }
+    while ((got = fread(block, 1, sizeof block, in)) != 0) {
+        whole = whole && fwrite(block, 1, got, out) == got;
+    }
+    whole = !ferror(in) && whole;
+    fclose(in);
+    whole = fclose(out) == 0 && whole;
+    remove(fresh);
+    if (!whole) {
+        fprintf(stderr, "engine: can't copy %s over %s, errno %d\n", fresh, name, errno);
+    }
+    return whole ? 0 : -1;
+}
+#endif
+
+/* whether a failed open of path found no file there. the PS2's devices
+ * give that their own errno, so there a file stat can't find is missing */
+bool missing(const char *path)
+{
+#ifdef _EE
+    struct stat about;
+
+    return errno == ENOENT || stat(path, &about) != 0;
+#else
+    (void)path;
+    return errno == ENOENT;
+#endif
+}
 
 /* take a request's handle where its event has room */
 sa_result begin(sa_engine &engine, sa_handle &handle)
@@ -127,7 +188,7 @@ sa_result sa_storage_read(sa_engine *engine, const char *name, void *buffer,
         return SA_ERR_INVALID;
     }
     if (!(in = fopen(name, "rb"))) {
-        return errno == ENOENT ? SA_ERR_MISSING : SA_ERR_IO;
+        return missing(name) ? SA_ERR_MISSING : SA_ERR_IO;
     }
     if (fstat(fileno(in), &about) != 0) {
         fclose(in);
@@ -168,12 +229,37 @@ sa_result sa_storage_write(sa_engine *engine, const char *name,
         return result;
     }
     fresh = std::string(name) + ".new";
+#ifdef _EE
+    /* the PS2's devices take the C library's files, as its log writes, and
+     * PCSX2's host: takes no rename over a file there: a save is written
+     * where it lies. a write cut short there leaves it part written, which
+     * the card's checks then refuse (engine/native/card.c). the PS2's own
+     * memory card, by its library, is to take the save's place */
+    (void)fd;
+    (void)fresh;
+    {
+        FILE *out = fopen(name, "wb");
+
+        done = out != nullptr && fwrite(data, 1, bytes, out) == bytes;
+        if (out != nullptr) {
+            done = fclose(out) == 0 && done;
+        }
+        if (!done) {
+            fprintf(stderr, "engine: can't write %s: %s, errno %d\n", name,
+                    out == nullptr ? "the open failed" : "the write failed", errno);
+            engine->resources.give(handle);
+            return SA_ERR_IO;
+        }
+        return end(*engine, handle, bytes, request);
+    }
+#else
     fd = made(fresh);
     done = fd >= 0 && written(fd, static_cast<const uint8_t *>(data), bytes) &&
            fsync(fd) == 0;
     if (fd >= 0) {
         done = close(fd) == 0 && done;
     }
+#endif
     if (!done || take_place(fresh.c_str(), name) != 0) {
         unlink(fresh.c_str());
         engine->resources.give(handle);

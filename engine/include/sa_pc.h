@@ -14,7 +14,7 @@
 #define SA_PC_H
 
 #include "sa_engine.h"
-#ifdef __PSP__
+#ifdef SA_SMALL
 #include <stdio.h>
 #endif
 
@@ -40,7 +40,7 @@ sa_result sa_present_live(sa_engine *engine, const sa_draw_live *draw);
  * two of which a rate needs. the PSP's adapter draws as the game calls
  * (engine/psp/draw.h), so no picture, resource or payload comes to its
  * engine, which keeps the least of each */
-#ifdef __PSP__
+#ifdef SA_SMALL
 #define SA_PC_ARENA (4U << 10)
 #define SA_PC_RESOURCES 16U
 #define SA_PC_PICTURES 1U
@@ -243,13 +243,13 @@ typedef struct sa_pc_sound_stats {
     uint32_t most_voices; /* of 64 */
     uint32_t unplayed; /* notes with no program, and sequences, unheard */
 } sa_pc_sound_stats;
-#ifdef __PSP__
+#ifdef SA_SMALL
 #define SA_PC_SOUND_QUEUE 512U
 #else
 #define SA_PC_SOUND_QUEUE 4096U
 #endif
 sa_result sa_pc_sound_stats_read(sa_engine *engine, sa_pc_sound_stats *stats);
-#ifdef __PSP__
+#ifdef SA_SMALL
 /* the PSP has no memory for a stream's file whole, as sa_audio_stream takes
  * one. this plays stream from the size bytes at base in file, whose first
  * bytes are head's, its header's fields among them: the sound reads the

@@ -24,6 +24,14 @@ struct psp_corner {
     int16_t u, v;
     uint32_t color;
     float x, y, z;
+#ifdef _EE
+    /* the PS2's raster draws what the PSP's leaves out: the corner's
+     * offset color, RGB, which adds to the texel where the state's offset
+     * is set, and A, the fog a corner of fog by its points takes. the
+     * PSP's engine reads the corner's bytes as they lie, so the field is
+     * the PS2's alone */
+    uint32_t offset;
+#endif
 };
 
 /* what the strips after it draw under. texture is the raster's, 0 for none.
@@ -36,6 +44,12 @@ struct psp_state {
     uint8_t decal, clamp_u, clamp_v, point;
     uint8_t depth, depth_write, cull, cut;
     uint8_t blend, src, dst;
+#ifdef _EE
+    /* the PS2's: the corners' offset colors add to the texel (SA_MAT_OFFSET),
+     * the fog by its mode (SA_FOG_*), and the texture mirrored past 1 in u
+     * or v (SA_MAT_FLIP_U, SA_MAT_FLIP_V) */
+    uint8_t offset, fog, flip_u, flip_v;
+#endif
 };
 
 /* open a picture's commands, over a screen cleared. commands left open by a

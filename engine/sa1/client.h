@@ -121,7 +121,7 @@ class Client {
 public:
     Disc disc;
     Textures pvrs;
-#ifdef __PSP__
+#ifdef SA_SMALL
     /* a texture's bytes as its file holds them, on their way to the
      * backend. the room stays from one texture to the next: the PSP's heap,
      * long in use, has no such stretch free though it has the bytes */

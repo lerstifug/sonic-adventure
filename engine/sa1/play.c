@@ -48,7 +48,7 @@
  * rumble, as engine/pc/input.h names them.
  *
  * a run ends with its figures, as native_play_close reports them */
-#ifdef __PSP__
+#ifdef SA_SMALL
 #include <malloc.h>
 #endif
 #include <stddef.h>
@@ -86,7 +86,7 @@ int pc_png_write(const char *path, uint32_t width, uint32_t height,
 /* the pictures whose times the run's report keeps, an hour's at 30 a second.
  * its other figures, the readout and --times take every picture. the PSP has
  * no memory to spare for them, and keeps twenty seconds' */
-#ifdef __PSP__
+#ifdef SA_SMALL
 #define MOST_TIMED 600U
 #else
 #define MOST_TIMED 108000U
@@ -430,7 +430,7 @@ void native_play_close(void)
     if (native_sound_engine) {
         print_sound();
     }
-#ifndef __PSP__
+#ifndef SA_SMALL
     sa_pc_client_report(client);
 #endif
     sa1_names_report();
@@ -556,7 +556,7 @@ static void give_picture(const uint8_t *records, size_t bytes)
         mesh_bytes += head.kind == SA_CAP_MESH ? head.size : 0;
         textures += head.kind == SA_CAP_TEXTURE;
         /* the PSP's adapter gives no record, and its build links no client */
-#ifdef __PSP__
+#ifdef SA_SMALL
         result = SA_OK;
 #else
         result = sa_pc_client_record(client, records + at);
@@ -686,7 +686,7 @@ void native_play_open(const char *disc, int recorded)
     sa_result result = sa_engine_memory(&desc, &bytes);
     static char why[SA_PC_WHY];
     char words[512];
-#ifndef __PSP__
+#ifndef SA_SMALL
     FILE *label =
         options.flags & SA_PC_WINDOW ? native_disc_file("0GDTEX.PVR") : NULL;
     static uint8_t icon[1 << 20];
@@ -703,7 +703,7 @@ void native_play_open(const char *disc, int recorded)
     if (result == SA_OK) {
 #ifdef _WIN32
         memory = _aligned_malloc(bytes, 32);
-#elif defined(__PSP__)
+#elif defined(SA_SMALL)
         memory = memalign(32, bytes);
 #else
         if (posix_memalign(&memory, 32, bytes) != 0) {
@@ -724,7 +724,7 @@ void native_play_open(const char *disc, int recorded)
         native_play_alert(words);
         exit(2);
     }
-#ifdef __PSP__
+#ifdef SA_SMALL
     fprintf(stderr,
             "sa1: the engine's block is %u bytes, and %u of the heap are in "
             "use with it\n",
@@ -732,12 +732,12 @@ void native_play_open(const char *disc, int recorded)
 #endif
     /* the PSP's adapter draws as the game calls (engine/psp/draw.h): no
      * record comes to give_picture, and no client reads one */
-#ifdef __PSP__
+#ifdef SA_SMALL
     (void)roots;
 #else
     client = sa_pc_client_create(engine, roots);
 #endif
-#ifdef __PSP__
+#ifdef SA_SMALL
     fprintf(stderr, "sa1: %u of the heap are in use with the client\n",
             (unsigned)mallinfo().uordblks);
 #endif

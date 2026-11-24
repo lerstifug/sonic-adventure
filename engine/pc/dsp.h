@@ -14,7 +14,7 @@ public:
     /* the ring's least words, 8K, and its most, 64K. the PSP's render runs
      * no DSP (mixer.h), so its ring is the least */
     static constexpr uint32_t RING_LEAST = 1U << 13;
-#ifdef __PSP__
+#ifdef SA_SMALL
     static constexpr uint32_t RING = RING_LEAST;
 #else
     static constexpr uint32_t RING = 1U << 16;

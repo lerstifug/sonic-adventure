@@ -18,7 +18,7 @@ namespace {
  * a picture's batches and its blending triangles start with. the PSP's
  * scene holds a picture's sprites and runs of triangles alone
  * (engine/psp/direct.cpp), and no model */
-#ifdef __PSP__
+#ifdef SA_SMALL
 constexpr uint32_t MOST_TRIANGLES = 1U << 11;
 constexpr uint32_t MOST_POINTS = 1U << 11;
 constexpr uint32_t BATCHES = 1U << 10;
@@ -231,7 +231,7 @@ void Scene::open(uint32_t blend, float reach)
      * World's lenses_ */
     lenses_.reserve(2 + LENSES);
     blend_list_.reserve(BLENDS);
-#ifdef __PSP__
+#ifdef SA_SMALL
     /* the PSP's scene draws no model, so it places and lights no points */
     return;
 #endif

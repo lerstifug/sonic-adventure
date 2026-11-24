@@ -135,7 +135,7 @@ public:
     /* make a texture of image for the batches. it returns its index, from 1,
      * or 0 where the device refuses. texture 0 is white */
     uint32_t add_texture(const Image &image, std::string &why);
-#ifdef __PSP__
+#ifdef SA_SMALL
     /* make a texture straight from a PVR's bytes, a GBIX chunk before its
      * PVRT or not: the PSP has no memory for the PVR's texels as an image
      * between. tried is false for a format it reads none of, which a caller

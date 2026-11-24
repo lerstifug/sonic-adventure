@@ -12,7 +12,7 @@
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
-#ifdef __PSP__
+#ifdef SA_SMALL
 #include <unistd.h>
 #endif
 
@@ -355,7 +355,7 @@ void Sound::destroy()
     for (Stream &s : streams_) {
         free(s.data);
         s.data = nullptr;
-#ifdef __PSP__
+#ifdef SA_SMALL
         if (s.file != nullptr) {
             fclose(s.file);
             s.file = nullptr;
@@ -460,7 +460,7 @@ sa_result Sound::load(const sa_audio_bank &bank)
     entry.what = ENTRY_BANK;
     entry.bank = bank;
     entry.bank.data = nullptr;
-#ifdef __PSP__
+#ifdef SA_SMALL
     /* the PSP's ring holds no bank: the bytes go to sound memory here, on
      * the game's thread, and the entry tells the render of them. a voice
      * that still plays what lay there hears the new bytes a moment early */
@@ -490,7 +490,7 @@ sa_result Sound::stream(uint32_t index, const void *data, uint32_t bytes)
     return push(entry, data, bytes) ? SA_OK : SA_ERR_FULL;
 }
 
-#ifdef __PSP__
+#ifdef SA_SMALL
 sa_result Sound::stream_file(uint32_t index, FILE *file, uint32_t base,
                              uint32_t size, const void *head, uint32_t bytes)
 {
@@ -540,7 +540,7 @@ void Sound::drain()
         const uint8_t *data = bytes_ + e.at % SOUND_BYTES;
         uint32_t bytes = e.end ? static_cast<uint32_t>(e.end - e.at) : 0;
 
-#ifdef __PSP__
+#ifdef SA_SMALL
         /* load() put a bank's bytes in sound memory already */
         if (e.what == ENTRY_BANK) {
             data = memory_ + e.bank.address;
@@ -572,7 +572,7 @@ void Sound::drain()
                 fx_outputs_ = Place{e.bank.address, bytes};
             }
         } else if (e.what == ENTRY_STREAM) {
-#ifdef __PSP__
+#ifdef SA_SMALL
             /* the stream's last file ends here, and the entry's takes its
              * place, where it has one */
             Stream &s = streams_[e.stream];
@@ -1055,7 +1055,7 @@ int32_t Sound::loop_first(Voice &v)
     return value;
 }
 
-#ifndef __PSP__
+#ifndef SA_SMALL
 /* the LFO's frame: pitch, a factor of the step, and gain. a wave is a saw,
  * square or triangle, or noise drawn anew each 256th of its period. pitch
  * swings both ways, and gain only falls, as far as its depth */
@@ -1235,7 +1235,7 @@ void Sound::start_stream(uint32_t index, const uint8_t *data, uint32_t bytes)
     }
     memcpy(s.data, data, bytes);
     s.bytes = bytes;
-#ifdef __PSP__
+#ifdef SA_SMALL
     /* the bytes given are a file's first, and the rest come by the window */
     if (s.file != nullptr) {
         s.bytes = s.whole;
@@ -1284,7 +1284,7 @@ namespace {
  * at on where at lies outside it */
 const uint8_t *stream_bytes(Stream &s, uint32_t at)
 {
-#ifdef __PSP__
+#ifdef SA_SMALL
     if (s.file != nullptr) {
         if (at < s.window_at || at + ADX_BLOCK > s.window_at + s.window_bytes) {
             uint32_t left = s.bytes - at;
@@ -1379,7 +1379,7 @@ bool Sound::stream_take(Stream &s, int16_t *out)
     return true;
 }
 
-#ifndef __PSP__
+#ifndef SA_SMALL
 /* a frame between the two samples around the stream's position, once its
  * lead has passed. a file at the output's rate plays its own samples */
 void Sound::stream_frame(Stream &s, float &left, float &right)
@@ -1619,7 +1619,7 @@ void Sound::qsound_place(uint32_t channel, uint32_t place)
     }
 }
 
-#ifdef __PSP__
+#ifdef SA_SMALL
 } // namespace pc
 /* the PSP's render (mixer.h), a block of frames at a time: it reads this
  * file's tables and helpers, so it is read here */

@@ -166,7 +166,7 @@ bool Disc::read(const std::string &path, std::vector<uint8_t> &bytes) const
     if (file == nullptr) {
         return false;
     }
-#ifdef __PSP__
+#ifdef SA_SMALL
     /* the PSP's C library reads 1 KB at a call otherwise, and a call
      * there costs far more than its bytes */
     setvbuf(file, nullptr, _IOFBF, 1 << 16);

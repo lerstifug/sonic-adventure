@@ -689,12 +689,14 @@ class Asm2c(unittest.TestCase):
         self.assertNotIn('native_jsr((uint32_t)(uintptr_t)&e_', self.written(source.format(trap='')))
 
     def test_a_jsr_to_the_game_s_c_is_called_by_x86_64_s_system_v_convention_and_the_psp_s_alone(self):
-        # the call passes integers and floats in registers of their own, as those two conventions do: Windows' and
-        # another processor's pass them another way, and there the JSR ends the run by name. each convention reads
-        # the float result where its own calls leave it
+        # the call passes integers and floats in registers of their own, as System V's, the PSP's EABI and the
+        # PS2's N32 do: Windows' loads both classes together (native_win64_call), and another processor's pass them
+        # another way, and there the JSR ends the run by name. each convention reads the float result where its own
+        # calls leave it
         text = self.written(SOURCE)
-        self.assertIn('\n#if (defined(__x86_64__) && !defined(_WIN32)) || defined(__PSP__)\n', text)
-        self.assertIn('#ifdef __PSP__\n    __asm__ volatile("swc1 $f0, %0" : "=m"(F.f[0]));\n#else\n'
+        self.assertIn('\n#if defined(__x86_64__) && defined(_WIN64)\n', text)
+        self.assertIn('\n#elif (defined(__x86_64__) && !defined(_WIN32)) || defined(__PSP__) || defined(_EE)\n', text)
+        self.assertIn('#if defined(__PSP__) || defined(_EE)\n    __asm__ volatile("swc1 $f0, %0" : "=m"(F.f[0]));\n#else\n'
                       '    __asm__ volatile("movss %%xmm0, %0" : "=m"(F.f[0]));\n#endif\n', text)
         self.assertNotIn('__i386__', text)
 

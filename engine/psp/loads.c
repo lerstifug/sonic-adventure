@@ -4,9 +4,14 @@
  * and calls native_program_read with the file's name. the build's program of
  * that name, in programs/, then takes its place: its image, zeros for its
  * bss, and its names. a file of the disc that is no program has none there,
- * and its decoded bytes stand */
+ * and its decoded bytes stand. the PS2's slice reads its programs by this
+ * file too, under _EE (engine/mk/ps2.mk) */
 #include <ctype.h>
+#ifdef _EE
+#include <kernel.h>
+#else
 #include <pspkernel.h>
+#endif
 #include <stdio.h>
 #include <string.h>
 #include <strings.h>
@@ -120,8 +125,15 @@ void native_program_read(const char *file)
      * addresses: the processor's data cache may still hold some of the new
      * bytes, and its instruction cache the last program's code. the new
      * bytes go to memory, and the instruction cache gives up all it holds */
+#ifdef _EE
+    /* the PS2's kernel: 0 writes the data cache back, 2 empties the
+     * instruction cache */
+    FlushCache(0);
+    FlushCache(2);
+#else
     sceKernelDcacheWritebackAll();
     sceKernelIcacheInvalidateAll();
+#endif
     psp_names_forget(head.origin,
                      head.origin + head.image_bytes + head.bss_bytes);
     psp_names_read(program, head.base, 0);

@@ -30,7 +30,7 @@ extern int native_target_stage, native_target_act;
  * it on size bytes of stack at stack until it returns */
 void sa1_main(void);
 void native_run_main(void *stack, size_t size);
-#ifdef __PSP__
+#ifdef SA_SMALL
 /* a file of the disc now lies whole at at, bytes long, where the game read
  * or decoded it. a file that holds addresses of its own bytes, as the
  * console loads it, has them made the PSP's (engine/psp/loads.c) */
@@ -42,7 +42,7 @@ extern int native_trace;
 /* map the threads' stacks in the domain, whole, before the game's main
  * runs. a run that can't map them ends */
 void native_threads_reserve(void);
-#ifdef __PSP__
+#ifdef SA_SMALL
 /* the PSP's threads' stacks are NATIVE_THREADS_BYTES at the place
  * native_threads_place gives, a multiple of 16, before
  * native_threads_reserve. the system knows a thread by the stack it made
@@ -109,7 +109,7 @@ extern int (*native_rumble)(uint32_t strength, uint32_t ms, uint32_t fade_ms);
  * its bytes. a host's library buffers as it should, and takes none */
 static inline FILE *native_buffered(FILE *file)
 {
-#ifdef __PSP__
+#ifdef SA_SMALL
     if (file) {
         setvbuf(file, NULL, _IOFBF, 1 << 16);
     }
@@ -161,7 +161,10 @@ static inline void native_fpu_game(uint32_t game)
 {
     __builtin_ia32_ldmxcsr(game);
 }
-#elif defined(__PSP__)
+#elif defined(SA_SMALL)
+/* the MIPS FPU's control word, the PSP's or the EE's. the EE ignores
+ * the rounding bits, as it always rounds toward zero, and flushes a
+ * denormal whatever FS says */
 #define NATIVE_FCR31_HOST (1U << 24)
 /* the word's record of what the last operation raised. a word read from the
  * FPU holds it, and no word written back does: a cause written beside its
@@ -188,7 +191,7 @@ static inline void native_fpu_game(uint32_t game)
  * their console address in it. the PSP has no memory there, and holds them
  * among its zeros for the console's registers (engine/psp/psp.h) */
 #define NATIVE_PVR_SIZE 0x2000UL
-#ifdef __PSP__
+#ifdef SA_SMALL
 extern char console_registers[];
 #define NATIVE_PVR ((uintptr_t)console_registers + 0x8000UL)
 #else
@@ -200,7 +203,7 @@ void native_lists_over(void);
  * record at texaddr. it returns 0 for a texture made in memory, and where
  * texaddr addresses no record */
 uint32_t native_texture_file(uint32_t texaddr);
-#ifdef __PSP__
+#ifdef SA_SMALL
 /* the loader's work area holds the PSP's commands for a picture between
  * loads (engine/psp/raster.cpp). a read or a decode that is about to write
  * at at says so first, and the area is the game's where at lies in it */

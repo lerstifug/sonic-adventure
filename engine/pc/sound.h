@@ -9,7 +9,7 @@
 #ifndef PC_SOUND_H
 #define PC_SOUND_H
 #include <stdint.h>
-#ifdef __PSP__
+#ifdef SA_SMALL
 #include <stdio.h>
 #endif
 
@@ -42,7 +42,7 @@ constexpr uint32_t FX_OUTPUTS = 16;
  * straight to sound memory there, and a stream plays from its file through
  * a window of STREAM_BYTES, a third of a second of stereo ADX: the ring
  * carries a stream's head alone */
-#ifdef __PSP__
+#ifdef SA_SMALL
 constexpr uint32_t SOUND_BYTES = 64U << 10;
 constexpr uint32_t STREAM_BYTES = 16U << 10;
 #else
@@ -59,7 +59,7 @@ constexpr uint32_t FILTER_LEVELS = 5;
 
 /* a number the render reads for each frame of a voice: a double, but a
  * float on the PSP, whose processor has no double */
-#ifdef __PSP__
+#ifdef SA_SMALL
 using Real = float;
 #else
 using Real = double;
@@ -76,7 +76,7 @@ struct Voice {
     uint32_t start, format, loop_start, loop_end;
     bool loops;
     double position; /* in samples, from the start */
-#ifdef __PSP__
+#ifdef SA_SMALL
     /* the PSP's render keeps the position as a sample and a 65536th of one,
      * and the gains its last block ended at, each side */
     uint32_t at, part;
@@ -151,7 +151,7 @@ struct Sequence {
 struct Stream {
     uint8_t *data;
     uint32_t bytes;
-#ifdef __PSP__
+#ifdef SA_SMALL
     /* the stream's file, where it plays from one: data holds window_bytes
      * of it from window_at, the file's bytes from base on, and whole is the
      * stream's length, which bytes takes as the stream starts. part is the
@@ -195,7 +195,7 @@ struct Entry {
     sa_audio_bank bank; /* its bytes lie in the byte ring, not at data */
     uint32_t stream;
     uint64_t at, end; /* its bytes in the ring, unwrapped. end is 0 for none */
-#ifdef __PSP__
+#ifdef SA_SMALL
     /* a stream's file, where its bytes lie in it and how many they are */
     FILE *file;
     uint32_t base, size;
@@ -210,7 +210,7 @@ public:
     sa_result submit(const sa_audio_command *commands, uint32_t count);
     sa_result load(const sa_audio_bank &bank);
     sa_result stream(uint32_t index, const void *data, uint32_t bytes);
-#ifdef __PSP__
+#ifdef SA_SMALL
     /* a stream of the size bytes at base in file, which the render reads a
      * window at a time and closes once another takes its place. head is
      * the stream's first bytes, its header's fields among them. a refusal
@@ -253,7 +253,7 @@ private:
     void fx_program(uint32_t program, uint32_t output_set);
     void fx_output_gains(uint32_t output);
     void qsound_place(uint32_t channel, uint32_t place);
-#ifdef __PSP__
+#ifdef SA_SMALL
     /* the PSP's render (mixer.h), a block of frames at a time */
     void sequence_block(uint32_t port, uint32_t frames);
     uint32_t reach_ = 0; /* the most a bank's end lay into sound memory */

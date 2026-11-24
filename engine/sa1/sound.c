@@ -18,7 +18,7 @@
 #include "native.h"
 #include "sa1.h"
 #include "sa_engine.h"
-#ifdef __PSP__
+#ifdef SA_SMALL
 #include "sa_pc.h"
 #endif
 
@@ -348,7 +348,7 @@ SDE_ERR sdBankDownload(SDMEMBLK handle, const SDE_DATA_TYPE bank_type,
     bank.address = (uint32_t)place[(int)bank_num].address;
     bank.bytes = (uint32_t)block->size;
     bank.data = block->data;
-#ifdef __PSP__
+#ifdef SA_SMALL
     if (native_trace) {
         fprintf(stderr, "sa1: bank %u of kind %u, %u bytes to %u\n",
                 (unsigned)bank.number, (unsigned)bank.kind,
@@ -463,7 +463,7 @@ static uint32_t little32(const uint8_t *at)
            (uint32_t)at[1] << 8 | at[0];
 }
 
-#ifdef __PSP__
+#ifdef SA_SMALL
 /* the PSP has no memory for a stream's file whole. read_bytes reads a
  * stream's head there, STREAM_HEAD bytes at most, and leaves its file open
  * in stream_file with where the stream lies in it, which start() hands to
@@ -578,7 +578,7 @@ static void start(struct talk *talk, size_t size, int32_t wait_ms)
     uint32_t game;
 
     if (size < ADX_HEAD || (bytes[0] << 8 | bytes[1]) != ADX_MARK) {
-#ifdef __PSP__
+#ifdef SA_SMALL
         stream_file_drop();
 #endif
         ADXT_Stop((ADXT)talk);
@@ -598,7 +598,7 @@ static void start(struct talk *talk, size_t size, int32_t wait_ms)
                     0);
         }
         game = native_fpu_host();
-#ifdef __PSP__
+#ifdef SA_SMALL
         /* a file's stream plays from the file, and its head is all of it
          * that lies in bytes. a stream in memory, as a movie's is, goes
          * unheard */
@@ -714,7 +714,7 @@ void ADXT_StartMem(ADXT adxt, void *adxdat)
         ADXT_Stop(adxt);
         return;
     }
-#ifdef __PSP__
+#ifdef SA_SMALL
     /* its head says how long the game hears it, and start() needs no more */
     stream_file_drop();
     size = size < STREAM_HEAD ? size : STREAM_HEAD;

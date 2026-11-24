@@ -17,6 +17,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef _EE
+#include <sys/stat.h>
+#endif
 
 #include "native.h"
 #include "sa_engine.h"
@@ -187,7 +190,27 @@ static sa_result unfiled(const char *path, uint8_t *image)
     sa_result result;
 
     if (!in) {
+#ifdef _EE
+        /* the PS2's devices, PCSX2's host: among them, give a failed open
+         * of a missing file an errno of their own, which isn't ENOENT. a
+         * file stat can't find either is missing: one it finds failed to
+         * read, and stays as it is */
+        struct stat held;
+        int why = errno;
+
+        if (why != ENOENT && stat(path, &held) == 0) {
+            fprintf(stderr, "sa1: can't open %s, which is there: errno %d\n",
+                    path, why);
+            return SA_ERR_IO;
+        }
+        if (why != ENOENT) {
+            fprintf(stderr, "sa1: %s isn't there: the open's errno %d\n",
+                    path, why);
+        }
+        return SA_ERR_MISSING;
+#else
         return errno == ENOENT ? SA_ERR_MISSING : SA_ERR_IO;
+#endif
     }
     result = fread(image, 1, sizeof card, in) == sizeof card && fgetc(in) == EOF
                  ? SA_OK

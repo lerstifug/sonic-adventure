@@ -31,6 +31,15 @@
  * the walk leaves out what the PSP's raster does: the offset color, fog, and
  * a texture's mirrored repeat */
 #include "draw.h"
+#ifdef _EE
+#include <pspkernel.h>
+
+/* the PS2's figures of the walk's time, which its raster reports: the
+ * microseconds its textures took to make, and its points' light, the
+ * latter where the settings' profile 1 asks (engine/ps2/main.c) */
+uint32_t ps2_walk_load_us, ps2_walk_light_us;
+extern int ps2_profile;
+#endif
 
 #define WALK_POINTS 2048
 #define WALK_MATERIALS 256
@@ -74,6 +83,9 @@ static uint32_t walk_texture_at(uint32_t texaddr, uint32_t attr,
         const NJS_TEXMEMLIST *memory = native_widen(texaddr);
         uint32_t game = native_fpu_host();
         uint32_t made = 0;
+#ifdef _EE
+        uint32_t load_began = sceKernelGetSystemTimeLow();
+#endif
 
         if (attr & NJD_TEXATTR_TYPE_MEMORY) {
             const NJS_TEXINFO *info = named;
@@ -108,6 +120,20 @@ static uint32_t walk_texture_at(uint32_t texaddr, uint32_t attr,
                     info ? (unsigned)info->texsurface.nHeight : 0);
         }
         walk_textures[slot].tried = 1;
+#ifdef _EE
+        {
+            uint32_t took = sceKernelGetSystemTimeLow() - load_began;
+
+            ps2_walk_load_us += took;
+            if (native_trace) {
+                fprintf(stderr,
+                        "sa1: the walk made texture %u of slot %u, global index %u, %s, in %u us, at vsync %lu\n",
+                        (unsigned)made, (unsigned)slot, (unsigned)memory->globalIndex,
+                        attr & NJD_TEXATTR_TYPE_MEMORY ? "from the game's texels" : "from the disc",
+                        (unsigned)took, native_vsyncs);
+            }
+        }
+#endif
         walk_textures[slot].made = made <= UINT16_MAX ? (uint16_t)made : 0;
         if (made > UINT16_MAX) {
             psp_texture_free(made);
@@ -206,6 +232,13 @@ struct walk_set {
     const float *world;
     uint16_t *lit_for;
     uint16_t key;
+#ifdef _EE
+    /* the PS2's: each point's offset color, from the palette or the
+     * lights, and where an unlit textured meshset under the palettes takes
+     * the words past them by point, as engine/pc/scene.cpp's do */
+    uint32_t *offsets;
+    int unlit_offset;
+#endif
 };
 
 /* corner's place in the meshset, of point i, into out */
@@ -249,6 +282,9 @@ static inline void walk_corner(const struct walk_set *w, struct psp_corner *out,
             psp_ninja_lit(w->lights, &w->material->texture, at, normal, &base,
                           &offset);
             w->colors[i] = walk_rgba(base);
+#ifdef _EE
+            w->offsets[i] = walk_rgba(offset);
+#endif
             w->lit_for[i] = w->key;
         }
         color = w->colors[i];
@@ -268,6 +304,21 @@ static inline void walk_corner(const struct walk_set *w, struct psp_corner *out,
     out->x = p->x;
     out->y = p->y;
     out->z = p->z;
+#ifdef _EE
+    /* the offset as engine/pc/scene.cpp gives it: the palette's or the
+     * lights', the unlit words where they serve, and none under Ninja's
+     * easy and simple drawers or for a point a material takes whole */
+    if (w->unlit_offset) {
+        out->offset = walk_rgba(
+            palettes_words[SA_CAP_PALETTES_COUNT * SA_CAP_PALETTE_ENTRIES * 2 +
+                           (i < SA_CAP_UNLIT_OFFSETS ? i : 0)]);
+    } else if (w->whole || (w->mode != SA_SHADE_PALETTE &&
+                            w->mode != SA_SHADE_LIGHTS)) {
+        out->offset = 0;
+    } else {
+        out->offset = w->offsets[i];
+    }
+#endif
 }
 
 /* the log's word of a model the walk leaves out, for the first few it
@@ -297,6 +348,9 @@ static int walk_model(const NJS_MODEL *model, uint8_t mode,
                       const struct draw_state *state)
 {
     static uint32_t colors[WALK_POINTS];
+#ifdef _EE
+    static uint32_t offsets[WALK_POINTS];
+#endif
     static int16_t env[WALK_POINTS][2];
     static uint16_t lit_for[WALK_POINTS];
     static struct psp_corner strip[WALK_STRIP];
@@ -370,6 +424,9 @@ static int walk_model(const NJS_MODEL *model, uint8_t mode,
                    m[4 * k + 2] * (float)seen[2];
         longest = length > longest ? length : longest;
     }
+#ifdef _EE
+    uint32_t light_began = (ps2_profile ? sceKernelGetSystemTimeLow() : 0);
+#endif
     /* each point's color, from the palette's entry its normal's dot with the
      * light picks, or under Ninja's easy and simple drawers how much of a
      * material's color the point takes, of 255. and how far the farthest
@@ -380,6 +437,9 @@ static int walk_model(const NJS_MODEL *model, uint8_t mode,
         float apart = dx * dx + dy * dy + dz * dz;
 
         far = apart > far ? apart : far;
+#ifdef _EE
+        offsets[i] = 0;
+#endif
         if (!model->normals) {
             colors[i] = by_palette ? 0xffffffffU : 255;
             continue;
@@ -400,6 +460,21 @@ static int walk_model(const NJS_MODEL *model, uint8_t mode,
                 scaled > 0.0F ? (scaled < 255.0F ? (int)scaled : 255) : 0;
 
             colors[i] = walk_rgba(words[entry * 2]);
+#ifdef _EE
+            /* the offset is the next palette's where the model's first
+             * material asks for a highlight (SA_MAT_SPECULAR), as
+             * engine/pc/scene.cpp reads it */
+            {
+                uint32_t pal = (state->palette & 7U) +
+                               ((materials[0].flags & SA_MAT_SPECULAR) ? 1U : 0U);
+
+                offsets[i] =
+                    pal < SA_CAP_PALETTES_COUNT
+                        ? walk_rgba(palettes_words[pal * SA_CAP_PALETTE_ENTRIES * 2 +
+                                                   (uint32_t)entry * 2 + 1])
+                        : 0;
+            }
+#endif
         } else if (!by_lights) {
             /* ninja_intensity's, as ninja_scaled holds it */
             float product = -diffuse * dot;
@@ -412,6 +487,9 @@ static int walk_model(const NJS_MODEL *model, uint8_t mode,
             colors[i] = held < 0 ? 0 : held > 255 ? 255 : (uint32_t)held;
         }
     }
+#ifdef _EE
+    ps2_walk_light_us += (ps2_profile ? sceKernelGetSystemTimeLow() - light_began : 0);
+#endif
     /* the model's ball in view space. within the raster's reach of the frame
      * on each side, its strips go as they are. else each goes a triangle at
      * a time, cut to what lies within */
@@ -453,7 +531,14 @@ static int walk_model(const NJS_MODEL *model, uint8_t mode,
             .lights = &lights,
             .world = world,
             .lit_for = lit_for,
-            .key = (uint16_t)(named + 1)};
+            .key = (uint16_t)(named + 1)
+#ifdef _EE
+                ,
+            .offsets = offsets,
+            .unlit_offset = by_palette && (material->flags & SA_MAT_UNLIT) &&
+                            (material->flags & SA_MAT_TEXTURE)
+#endif
+        };
         struct psp_state drawn = {
             .texture = material->flags & SA_MAT_TEXTURE ? material->texture : 0,
             .decal = (material->flags & SA_MAT_DECAL) != 0,
@@ -466,7 +551,15 @@ static int walk_model(const NJS_MODEL *model, uint8_t mode,
             .cut = (uint8_t)cut,
             .blend = (uint8_t)(blended && !cut),
             .src = material->src,
-            .dst = material->dst};
+            .dst = material->dst
+#ifdef _EE
+                ,
+            .offset = (material->flags & SA_MAT_OFFSET) != 0,
+            .fog = (uint8_t)((state->tsp & TSP_FOG) >> TSP_FOG_SHIFT),
+            .flip_u = (material->flags & SA_MAT_FLIP_U) != 0,
+            .flip_v = (material->flags & SA_MAT_FLIP_V) != 0
+#endif
+        };
         const Sint16 *at = set->meshes;
         uint32_t corners = 0, strips = 0, corner = 0;
         struct psp_corner *out, *first;

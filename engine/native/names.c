@@ -15,7 +15,7 @@ void names_symbol_add(uint32_t address, uint32_t size, int code,
 {
     if (symbol_count == symbol_room) {
         /* the PSP's names are the few objects found by name */
-#ifdef __PSP__
+#ifdef SA_SMALL
         symbol_room = symbol_room ? symbol_room * 2 : 1 << 6;
 #else
         symbol_room = symbol_room ? symbol_room * 2 : 1 << 12;

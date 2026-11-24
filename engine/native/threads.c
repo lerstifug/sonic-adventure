@@ -10,8 +10,10 @@
  * the registers on that stack, with the stack's bounds from the TEB. Windows'
  * exceptions and Wine's fault handler test a frame against those bounds.
  *
- * the PSP's context is a stack pointer too, and its native_switch keeps
- * what MIPS's EABI keeps across a call. the PSP maps no memory, so its
+ * a small console's context, the PSP's or the PS2's (SA_SMALL), is a
+ * stack pointer too, and its native_switch keeps what its MIPS ABI keeps
+ * across a call: the PSP's EABI, or N32 on the PS2's EE. neither
+ * console maps memory, so the
  * stacks are the program's own bytes, and a guard there is a word each
  * switch holds to its value */
 #define _GNU_SOURCE
@@ -20,7 +22,7 @@
 #include <string.h>
 #ifdef _WIN32
 #include <windows.h>
-#elif !defined(__PSP__)
+#elif !defined(SA_SMALL)
 #include <sys/mman.h>
 #include <ucontext.h>
 #endif
@@ -32,7 +34,7 @@
  * access, with a stack over it. a thread that runs off its stack's end
  * faults in the guard, and the stack below stays whole. a frame of
  * GUARD_SIZE or more can pass over the guard without touching it */
-#ifdef __PSP__
+#ifdef SA_SMALL
 #define CONTEXTS 8
 #define STACK_SIZE 0x4000UL
 #define GUARD_SIZE 0x10UL
@@ -183,7 +185,96 @@ static int guard(void *at, size_t size)
 {
     return VirtualFree(at, size, MEM_DECOMMIT) != 0;
 }
-#elif defined(__PSP__)
+#elif defined(SA_SMALL)
+#ifdef _EE
+/* the PS2's EE. native_switch(from, to) saves what N32 keeps across a call
+ * on the running stack: s0 to s7, fp, ra and gp, each its 64 bits, since
+ * N32's code keeps a long long whole in one of them, then f20 to f31 and the
+ * FPU's FCR31. it writes that stack's pointer to *from, and loads the same
+ * from the stack at to. a frame is SWITCH_WORDS words of 4 bytes: the
+ * general registers from its first word, two words each, then the FPU's,
+ * then FCR31, which loads without its cause bits (native.h). N32 asks of
+ * f20 to f31 only the even ones where its FPU's registers are 64 bits; the
+ * EE's are 32, and the switch keeps all twelve. the return's delay slot
+ * gives the frame back, as the PSP's does */
+void native_switch(void **from, void *to);
+__asm__(".text\n"
+        ".set push\n"
+        ".set noreorder\n"
+        ".globl native_switch\n"
+        ".ent native_switch\n"
+        "native_switch:\n"
+        "    addiu $sp, $sp, -144\n"
+        "    sd $s0, 0($sp)\n"
+        "    sd $s1, 8($sp)\n"
+        "    sd $s2, 16($sp)\n"
+        "    sd $s3, 24($sp)\n"
+        "    sd $s4, 32($sp)\n"
+        "    sd $s5, 40($sp)\n"
+        "    sd $s6, 48($sp)\n"
+        "    sd $s7, 56($sp)\n"
+        "    sd $fp, 64($sp)\n"
+        "    sd $ra, 72($sp)\n"
+        "    sd $gp, 80($sp)\n"
+        "    swc1 $f20, 88($sp)\n"
+        "    swc1 $f21, 92($sp)\n"
+        "    swc1 $f22, 96($sp)\n"
+        "    swc1 $f23, 100($sp)\n"
+        "    swc1 $f24, 104($sp)\n"
+        "    swc1 $f25, 108($sp)\n"
+        "    swc1 $f26, 112($sp)\n"
+        "    swc1 $f27, 116($sp)\n"
+        "    swc1 $f28, 120($sp)\n"
+        "    swc1 $f29, 124($sp)\n"
+        "    swc1 $f30, 128($sp)\n"
+        "    swc1 $f31, 132($sp)\n"
+        "    cfc1 $t0, $31\n"
+        "    nop\n"
+        "    sw $t0, 136($sp)\n"
+        "    sw $sp, 0($a0)\n"
+        "    move $sp, $a1\n"
+        "    lw $t0, 136($sp)\n"
+        "    lui $t1, 0xfffc\n"
+        "    ori $t1, $t1, 0x0fff\n"
+        "    and $t0, $t0, $t1\n"
+        "    ctc1 $t0, $31\n"
+        "    nop\n"
+        "    ld $s0, 0($sp)\n"
+        "    ld $s1, 8($sp)\n"
+        "    ld $s2, 16($sp)\n"
+        "    ld $s3, 24($sp)\n"
+        "    ld $s4, 32($sp)\n"
+        "    ld $s5, 40($sp)\n"
+        "    ld $s6, 48($sp)\n"
+        "    ld $s7, 56($sp)\n"
+        "    ld $fp, 64($sp)\n"
+        "    ld $ra, 72($sp)\n"
+        "    ld $gp, 80($sp)\n"
+        "    lwc1 $f20, 88($sp)\n"
+        "    lwc1 $f21, 92($sp)\n"
+        "    lwc1 $f22, 96($sp)\n"
+        "    lwc1 $f23, 100($sp)\n"
+        "    lwc1 $f24, 104($sp)\n"
+        "    lwc1 $f25, 108($sp)\n"
+        "    lwc1 $f26, 112($sp)\n"
+        "    lwc1 $f27, 116($sp)\n"
+        "    lwc1 $f28, 120($sp)\n"
+        "    lwc1 $f29, 124($sp)\n"
+        "    lwc1 $f30, 128($sp)\n"
+        "    lwc1 $f31, 132($sp)\n"
+        "    jr $ra\n"
+        "    addiu $sp, $sp, 144\n"
+        ".end native_switch\n"
+        ".set pop\n");
+
+typedef void *saved;
+
+/* ra's low word, and gp's, which a fresh frame takes from the caller */
+#define SWITCH_WORDS 36
+#define SWITCH_RA 18
+#define SWITCH_GP 20
+#define SWITCH_FCR31 34
+#else
 /* native_switch(from, to) saves what the EABI keeps across a call on the
  * running stack: s0 to s7, fp and ra, f20 to f31, and the FPU's FCR31. it
  * writes that stack's pointer to *from, and loads the same from the stack at
@@ -265,6 +356,7 @@ typedef void *saved;
 #define SWITCH_WORDS 24
 #define SWITCH_RA 9
 #define SWITCH_FCR31 22
+#endif
 /* the word a stack's guard holds while no frame has run into it */
 #define GUARD_WORD 0x5a1a57acU
 
@@ -279,6 +371,14 @@ static void make(saved *self, char *stack, size_t size, void (*entry)(void))
     __asm__ volatile("cfc1 %0, $31" : "=r"(mode));
     memset(sp, 0, SWITCH_WORDS * sizeof *sp);
     sp[SWITCH_RA] = (uint32_t)entry;
+#ifdef SWITCH_GP
+    {
+        uint32_t gp;
+
+        __asm__ volatile("move %0, $gp" : "=r"(gp));
+        sp[SWITCH_GP] = gp;
+    }
+#endif
     sp[SWITCH_FCR31] = mode & ~NATIVE_FCR31_CAUSE;
     *self = sp;
 }
@@ -394,7 +494,7 @@ static int stands_on(size_t slot)
 
 void native_threads_reserve(void)
 {
-#ifndef __PSP__
+#ifndef SA_SMALL
     native_map((void *)STACKS, (CONTEXTS + 1) * SLOT_SIZE,
                "the threads' stacks");
 #endif
@@ -514,7 +614,7 @@ static saved host, game;
 
 static void game_main(void)
 {
-#ifdef __PSP__
+#ifdef SA_SMALL
     fprintf(stderr, "sa1: on the game's stack\n");
 #endif
     sa1_main();

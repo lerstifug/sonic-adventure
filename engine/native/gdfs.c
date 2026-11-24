@@ -377,7 +377,7 @@ struct gdfs *gdFsOpen(const char *name, void *dirrec)
 
     (void)dirrec;
     snprintf(native_last_opened, sizeof native_last_opened, "%s", name);
-#ifdef __PSP__
+#ifdef SA_SMALL
     if (native_trace) {
         fprintf(stderr, "sa1: open %s, at vsync %lu\n", name, native_vsyncs);
     }
@@ -455,7 +455,7 @@ int32_t gdFsRead(struct gdfs *gdfs, int32_t sectors, void *buffer)
     size_t from, bytes, held;
     const char *why = NULL;
 
-#ifdef __PSP__
+#ifdef SA_SMALL
     native_work_taken(buffer);
     if (native_trace) {
         fprintf(stderr, "sa1: read %ld sectors of %s\n", (long)sectors,
@@ -509,7 +509,7 @@ int32_t gdFsRead(struct gdfs *gdfs, int32_t sectors, void *buffer)
     }
     /* the drive writes whole sectors: a short last one ends in zeros here */
     memset((char *)buffer + held, 0, bytes - held);
-#ifdef __PSP__
+#ifdef SA_SMALL
     /* a file read whole by one call lies where the game wants it, but a
      * packed one, whose bytes prs_decompress has yet to decode */
     if (from == 0 && held == (size_t)gdfs->size &&

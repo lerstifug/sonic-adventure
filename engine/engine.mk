@@ -178,3 +178,4 @@ receipt   = rm -f $1/fetched.txt && sums=$$(awk '$$2 ~ "^$1/"' tools/SHA256SUMS)
 include engine/mk/owner.mk engine/mk/drawers.mk engine/mk/replay.mk engine/mk/native.mk
 # The PSP slice's fragment, which takes native.mk's lists
 include engine/mk/psp.mk
+include engine/mk/ps2.mk

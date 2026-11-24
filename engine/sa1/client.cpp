@@ -13,7 +13,7 @@ namespace pc {
 
 /* lend bytes to a new resource. it returns SA_NULL where the runtime
  * refuses it */
-#ifdef __PSP__
+#ifdef SA_SMALL
 /* the room chunk starts with, and the most it keeps: a texture of 256
  * texels a side at 16 bits each */
 constexpr size_t CHUNK_KEPT = (256 * 256 * 2) + 4096;
@@ -37,7 +37,7 @@ sa_handle Client::make(uint32_t kind, uint32_t format,
     totals.created++;
     held += desc.bytes;
     totals.held_most = std::max(totals.held_most, held);
-#ifdef __PSP__
+#ifdef SA_SMALL
     /* the PSP's backend takes a texture's texels as the texture is made and
      * reads the lent bytes no more, and the PSP has no memory to hold both.
      * chunk keeps its room for the next texture */
@@ -203,7 +203,7 @@ sa_handle Client::texture(uint32_t id)
         std::string why;
 
         t.tried = true;
-#ifdef __PSP__
+#ifdef SA_SMALL
         /* the PSP has no memory for a texture's pixels here and again in
          * the backend: the backend takes the PVR's own bytes, from the disc
          * or as the game made them, and makes the texture of them */
@@ -895,7 +895,7 @@ sa_pc_client *sa_pc_client_create(sa_engine *engine, const char *const *roots)
         made->disc.add_root(*roots);
     }
     made->pvrs.index(made->disc, "SONICADV");
-#ifdef __PSP__
+#ifdef SA_SMALL
     made->chunk.reserve(pc::CHUNK_KEPT);
 #endif
     return reinterpret_cast<sa_pc_client *>(made);

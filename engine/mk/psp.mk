@@ -63,7 +63,7 @@ endif
 # dc's take them (config/gcc.mk): a program's link then leaves out what
 # nothing of the program reaches. summary.c's entries take the section the
 # memory contract names for them
-PSP_CFLAGS = -std=gnu89 -ffreestanding -nostdinc -isystem $(PSP_GCC_INCLUDE) -DNONMATCHING \
+PSP_CFLAGS = -std=gnu89 -ffreestanding -nostdinc -isystem $(PSP_GCC_INCLUDE) -DNONMATCHING -DSA_SMALL \
 	-include engine/psp/prelude.h $(PSP_OPT) -G0 -fcommon -fno-strict-aliasing -fno-delete-null-pointer-checks \
 	-fwrapv -ffp-contract=off -fno-builtin -fms-extensions -frounding-math -ffunction-sections $(PSP_SECTIONS) -w
 $(PSP)/obj/events/%.o: PSP_OPT := -Os
@@ -126,7 +126,7 @@ $(PSP)/obj/gen/%.o: build/gen/%.c $(PSP_PASSES)
 # word's marks, which a wider host's objects take, mean nothing here, and
 # mips, GCC's own name for the processor, is a name of the adapter's. The
 # PSP's uint32_t is a long, which the host's C prints as an int
-PSP_HOST_CFLAGS := -std=gnu17 -O2 -G0 -fno-strict-aliasing -ffp-contract=off -frounding-math -DNATIVE_DOMAIN=0U \
+PSP_HOST_CFLAGS := -std=gnu17 -O2 -G0 -DSA_SMALL -fno-strict-aliasing -ffp-contract=off -frounding-math -DNATIVE_DOMAIN=0U \
 	-D__ptr32= -D__uptr= -Umips -Wno-format -Iengine/psp -Iengine/native -Iengine/sa1 -I$(ENGINE_INCLUDE) $(PLAY_MATH_INCLUDE) \
 	-I$(PSP_SDK)/include
 $(PSP)/obj/engine/native/%.o: engine/native/%.c $(PSP_NEEDS)
@@ -181,7 +181,7 @@ endif
 # but for its device and its window, which are the PSP's own. The C
 # library's headers give POSIX's names under GNU's dialect alone, and this
 # GCC warns where the host's compilers don't, so a warning stops no build
-PSP_CXXFLAGS := -std=gnu++17 -fno-exceptions -fno-rtti -Wall -Wextra -Wno-format -Umips -O2 -G0 -I$(ENGINE_INCLUDE) -Iengine/sa1 -Iengine/pc -Iengine/runtime -Iengine/psp \
+PSP_CXXFLAGS := -std=gnu++17 -DSA_SMALL -fno-exceptions -fno-rtti -Wall -Wextra -Wno-format -Umips -O2 -G0 -I$(ENGINE_INCLUDE) -Iengine/sa1 -Iengine/pc -Iengine/runtime -Iengine/psp \
 	-I$(PSP_SDK)/include
 PSP_CXX_SOURCES := engine/runtime/engine.cpp \
 	$(addprefix engine/pc/,backend.cpp world.cpp scene.cpp pvr.cpp ninja.cpp sound.cpp dsp.cpp disc.cpp \

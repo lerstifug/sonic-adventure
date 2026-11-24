@@ -12,7 +12,7 @@
 #include <time.h>
 
 #include "native.h"
-#ifdef __PSP__
+#ifdef SA_SMALL
 #include "draw.h"
 #include "psp.h"
 #endif
@@ -340,7 +340,7 @@ const struct peripheral *njGetPeripheral(uint32_t port)
  * reads zeros there, never another texture's record */
 #define PVM_NAME_SIZE 28
 /* the PSP has memory for an eighth of these, the console's own count */
-#ifndef __PSP__
+#ifndef SA_SMALL
 #define TEXTURE_RECORDS 16384
 #else
 #define TEXTURE_RECORDS 2048
@@ -882,14 +882,14 @@ static void write_event_head(void *dest, const char *file)
  * has no memory there, and holds that RAM in console_ram */
 static int lies_at(const void *dest, uint32_t address)
 {
-#ifdef __PSP__
+#ifdef SA_SMALL
     return (const char *)dest == NATIVE_RAM(address);
 #else
     return ((uintptr_t)dest & MIRROR_MASK) == address;
 #endif
 }
 
-#ifdef __PSP__
+#ifdef SA_SMALL
 void native_work_taken(const void *at)
 {
     const char *byte = at;
@@ -905,12 +905,12 @@ int32_t prs_decompress(void *source, void *dest)
 {
     int32_t size;
 
-#ifdef __PSP__
+#ifdef SA_SMALL
     native_work_taken(source);
     native_work_taken(dest);
 #endif
     size = prs_decode(source, dest);
-#ifdef __PSP__
+#ifdef SA_SMALL
     if (size > 0) {
         native_file_placed(native_last_opened, dest, (uint32_t)size);
     }

@@ -870,7 +870,8 @@ def write(path, program):
     # there. a register widens as a pointer, whose low half a number keeps,
     # and the float result is read where those calls leave it. the PSP's
     # calls, MIPS's EABI with a single-precision FPU, give each class
-    # registers of its own too. Windows passes each argument by its place,
+    # registers of its own too, and so do the PS2's, N32's on the EE's
+    # single-precision FPU. Windows passes each argument by its place,
     # not its class, so there the call loads R4 to R7 into the four integer
     # registers and FR4 to FR7 into the four float ones together
     # (native_win64_call, engine/native/shim.c): right for a function whose
@@ -883,11 +884,11 @@ def write(path, program):
             '    float floats_[4] = {F.f[4], F.f[5], F.f[6], F.f[7]};',
             '    uintptr_t r_ = native_win64_call((void *)widened(target), ints_, floats_, &out_);',
             '    F.f[0] = out_;', '    R[0] = (uint32_t)r_;',
-            '#elif (defined(__x86_64__) && !defined(_WIN32)) || defined(__PSP__)',
+            '#elif (defined(__x86_64__) && !defined(_WIN32)) || defined(__PSP__) || defined(_EE)',
             '    uintptr_t r_ = ((uintptr_t (*)(uintptr_t, uintptr_t, uintptr_t, uintptr_t, float, float, float, float))'
             'widened(target))(widened(R[4]), widened(R[5]), widened(R[6]), widened(R[7]), F.f[4], F.f[5], F.f[6], '
             'F.f[7]);',
-            '#ifdef __PSP__',
+            '#if defined(__PSP__) || defined(_EE)',
             '    __asm__ volatile("swc1 $f0, %0" : "=m"(F.f[0]));',
             '#else',
             '    __asm__ volatile("movss %%xmm0, %0" : "=m"(F.f[0]));',

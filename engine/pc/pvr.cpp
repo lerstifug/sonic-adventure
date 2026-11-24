@@ -12,7 +12,7 @@ namespace pc {
 namespace {
 
 /* the most files read_ holds */
-#ifdef __PSP__
+#ifdef SA_SMALL
 /* the PSP has memory for one */
 constexpr size_t MOST_READ = 1;
 #else
@@ -388,7 +388,7 @@ void Textures::add(const std::string &path, bool compressed,
     }
 }
 
-#ifdef __PSP__
+#ifdef SA_SMALL
 namespace {
 
 /* the PSP reads the disc's files too slowly to index them at each start: a
@@ -556,7 +556,7 @@ bool find_place(uint32_t global_index, const std::string &name, uint32_t file,
 } // namespace
 #endif
 
-#ifdef __PSP__
+#ifdef SA_SMALL
 namespace {
 
 /* the PSP has no memory for an archive whole, decoded or not: the largest
@@ -759,7 +759,7 @@ void Textures::index(const Disc &disc, const std::string &dir)
     std::vector<uint8_t> bytes;
     std::vector<uint8_t> plain;
 
-#ifdef __PSP__
+#ifdef SA_SMALL
     if (read_index()) {
         return;
     }
@@ -777,7 +777,7 @@ void Textures::index(const Disc &disc, const std::string &dir)
             }
         }
     }
-#ifdef __PSP__
+#ifdef SA_SMALL
     /* the places go to the file, and leave the memory they took */
     write_index(places_);
     std::vector<PvrPlace>().swap(places_);
@@ -785,7 +785,7 @@ void Textures::index(const Disc &disc, const std::string &dir)
 #endif
 }
 
-#ifdef __PSP__
+#ifdef SA_SMALL
 bool Textures::chunk(const Disc &disc, uint32_t global_index,
                      const std::string &name, uint32_t file,
                      std::vector<uint8_t> &chunk, std::string &why) const
@@ -816,7 +816,7 @@ bool Textures::load(const Disc &disc, uint32_t global_index,
                     const std::string &name, uint32_t file, Image &image,
                     std::string &why) const
 {
-#ifdef __PSP__
+#ifdef SA_SMALL
     std::vector<uint8_t> held;
 
     return chunk(disc, global_index, name, file, held, why) &&
