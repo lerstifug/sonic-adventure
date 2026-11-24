@@ -158,6 +158,8 @@ psp_draw_cut                         engine       psp      a strip of a model th
 ps2_vu_open                          engine       ps2      room in the PS2's picture for a batch of a model's corners, which VU1 draws (engine/ps2/sa1/models.h)
 ps2_vu_close                         engine       ps2      that batch's end, of the corners written, which goes to VU1
 ps2_vu_palette                       engine       ps2      the palette a model's batches light by, which goes to VU1's memory
+ps2_textures_begin                   engine       ps2      the start of a load's textures, whose TIM2 files stay open till its end (engine/ps2/textures.cpp)
+ps2_textures_end                     engine       ps2      that load's end, which closes its files unless they stay resident
 psp_picture_drop                     engine       psp      a picture the game dropped, whose commands the raster ends unshown
 psp_texture_texels                   engine       psp      the raster's texture of texels the game made in memory
 psp_scene_begin                      engine       psp      the start of a picture in the PSP's scene, which takes the adapter's sprites and runs of triangles as a host's records would (engine/psp/direct.cpp)

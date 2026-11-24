@@ -605,6 +605,23 @@ int main(int argc, char **argv)
     }
     fclose(report);
     rename("report.csv.new", "report.csv");
+    /* each texture file's name id, as the game's records keep it
+     * (native_disc_file_id), and its TIM2's name, a line each */
+    {
+        std::string table;
+        char line[96];
+        bool changed = false;
+
+        for (uint32_t f = 0; f < head.files; f++) {
+            std::string path(files[f].path, strnlen(files[f].path, sizeof files[f].path));
+
+            snprintf(line, sizeof line, "%08x %s\n", files[f].id, name_of(path).c_str());
+            table += line;
+        }
+        if (!write_changed("files.txt", std::vector<uint8_t>(table.begin(), table.end()), changed)) {
+            return 1;
+        }
+    }
     printf("textures_tm2: %zu files, %u pictures, %u refused, %u rewritten, %.1f MB of texels and CLUTs;",
            names.size(), pictures, refused, written, total / 1048576.0);
     for (const auto &[kind, n] : kinds) {

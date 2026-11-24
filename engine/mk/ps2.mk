@@ -311,7 +311,10 @@ $(PS2)/textures_tm2: $(PS2_TM2_SOURCES) engine/pc/pvr.h engine/pc/disc.h engine/
 $(PS2)/game/textures/report.csv: $(PS2)/textures_tm2 SHA256SUMS
 	@$(call status,tm2,$(@D))
 	$(Q)$< $(abspath orig) $(abspath $(PS2)/game)
-ps2: $(PS2)/game/textures/report.csv
+# and the list of those that stay in memory (engine/ps2/resident.txt)
+$(PS2)/game/textures/resident.txt: engine/ps2/resident.txt $(PS2)/game/textures/report.csv
+	$(Q)cp $< $@
+ps2: $(PS2)/game/textures/report.csv $(PS2)/game/textures/resident.txt
 
 # PS2_OUT, from the environment, puts the slice's objects and links outside
 # the tree: on WSL, its own filesystem, where a file's every open and read
@@ -323,11 +326,14 @@ ps2: $(PS2)/game/textures/report.csv
 # the tree on WSL's own filesystem, into the Windows tree's folder
 PS2_RUN ?= build/engine/ps2/game
 ifneq ($(abspath $(PS2)),$(abspath build/engine/ps2))
-ps2: $(PS2_RUN)/SONICADV.ELF $(PS2_RUN)/textures.pak $(PS2_RUN)/textures/report.csv
+ps2: $(PS2_RUN)/SONICADV.ELF $(PS2_RUN)/textures.pak $(PS2_RUN)/textures/report.csv \
+	$(PS2_RUN)/textures/resident.txt
 $(PS2_RUN)/textures/report.csv: $(PS2)/game/textures/report.csv
 	@$(call status,copy,$(@D))
 	$(Q)mkdir -p $(@D)
-	$(Q)cp -u $(PS2)/game/textures/*.tm2 $(@D)/
+	$(Q)cp -u $(PS2)/game/textures/*.tm2 $(PS2)/game/textures/files.txt $(@D)/
+	$(Q)cp $< $@
+$(PS2_RUN)/textures/resident.txt: $(PS2)/game/textures/resident.txt $(PS2_RUN)/textures/report.csv
 	$(Q)cp $< $@
 $(PS2_RUN)/SONICADV.ELF: $(PS2)/game/SONICADV.ELF
 	@$(call status,copy,$(PS2_RUN))

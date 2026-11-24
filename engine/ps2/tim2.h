@@ -86,6 +86,21 @@ static_assert(sizeof(Tim2Terms) == 24, "a picture's terms are 24 bytes");
 /* the GS's formats, as TEX0's PSM names them */
 constexpr uint8_t GS_PSM_32 = 0x00, GS_PSM_16 = 0x02, GS_PSM_8 = 0x13, GS_PSM_4 = 0x14;
 
+/* a picture the raster draws from its TIM2's memory (engine/ps2/gs.cpp's
+ * ps2_texture_add_picture): its texels and CLUT, which stay in the lender's
+ * memory till the raster gives the lender back (engine/ps2/textures.cpp) */
+struct Lent {
+    uint16_t width, height;   /* the image's own */
+    uint32_t side_w, side_h;  /* the texels' */
+    uint32_t psm;             /* a GS_PSM_ */
+    const void *texels;
+    const void *clut;         /* null where none */
+    uint32_t clut_colors;     /* 16 or 256, or 0 */
+    bool cuts;
+    void *lender;
+    bool fixed;               /* a place of its own in the GS's memory */
+};
+
 /* a CLUT entry's place in the GS's CSM1 order of 256 */
 inline uint32_t csm1_place(uint32_t i)
 {

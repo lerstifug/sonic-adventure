@@ -698,6 +698,11 @@ static uint32_t walk_texture_at(uint32_t texaddr, uint32_t attr,
                                 const void *named);
 static void walk_released(const NJS_TEXLIST *list);
 #endif
+#ifdef _EE
+/* a load's textures are made between these (engine/ps2/textures.cpp) */
+void ps2_textures_begin(void);
+void ps2_textures_end(void);
+#endif
 
 /* name is the texture's, or null for the name its list holds. a texture the
  * game made in memory has none: its list holds its NJS_TEXINFO there.
@@ -757,6 +762,19 @@ void sa1_textures_loaded(const void *texlist, uint32_t count,
     if (!recording) {
         return;
     }
+#ifdef _EE
+    /* the PS2 makes each texture now, at the game's own load, so no draw
+     * reads the disc: from the TIM2 of the load's file, read once for the
+     * whole list (engine/ps2/textures.cpp) */
+    ps2_textures_begin();
+    for (uint32_t i = 0; i < count && i < list->nbTexture; i++) {
+        (void)walk_texture(list, i);
+    }
+    ps2_textures_end();
+    if (list) {
+        return;
+    }
+#endif
 #ifdef SA_SMALL
     /* a texture of the disc's is made at its first draw: the PSP has no
      * memory for one no draw takes. the game's own texels are read now,

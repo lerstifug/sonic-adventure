@@ -73,6 +73,9 @@ int ps2_vu = 1;
 /* models 1 draws the game's models by the PS2's own path
  * (engine/ps2/sa1/models.h) in the walk's place, stage by stage */
 int ps2_models = 0;
+/* textures pak takes the textures from the pack, as before the TIM2 files
+ * (engine/ps2/textures.cpp) */
+int ps2_textures_pak = 0;
 /* the sampling profiler's (engine/ps2/profile.c) */
 static int sampling;
 void ps2_profile_start(void);
@@ -239,6 +242,10 @@ static int take_target(const char *name, const char *value)
     }
     if (!strcmp(name, "models")) {
         ps2_models = atoi(value);
+        return 1;
+    }
+    if (!strcmp(name, "textures")) {
+        ps2_textures_pak = !strcmp(value, "pak");
         return 1;
     }
     /* sample 1: the sampling profiler (profile.c) */

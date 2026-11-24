@@ -60,6 +60,7 @@ extern "C" {
 #include "pvr.h"
 #include "raster.h"
 #include "texels.h"
+#include "tim2.h"
 
 /* VU1's program for a strip (engine/ps2/strip.vsm) */
 extern "C" uint32_t VU1Strip_CodeStart __attribute__((section(".vudata")));
@@ -92,6 +93,9 @@ namespace pc {
 
 /* direct.cpp's figure of the pictures' waits for the display */
 uint32_t psp_wait_us;
+/* textures.cpp's: a lender's texture is gone, and no stream reads its
+ * texels */
+void ps2_texture_returned(void *lender);
 
 namespace {
 
@@ -179,10 +183,23 @@ struct Texture {
     /* the copies mirrored in u, in v, and in both, made at their first use */
     Texture *mirrored[3] = {nullptr, nullptr, nullptr};
     /* its place in the GS's memory, in blocks, -1 where it lies there no
-     * more, the blocks it takes, and the picture that last bound it */
+     * more, the blocks it takes, its texels' alone, and the picture that
+     * last bound it */
     int32_t block = -1;
-    uint32_t blocks = 0;
+    uint32_t blocks = 0, texel_blocks = 0;
     uint32_t used = 0;
+    /* a 4-bit or 8-bit texture's CLUT: 16 or 256 colors at 32 bits, as the
+     * GS's CSM1 takes them */
+    const void *clut = nullptr;
+    uint32_t clut_colors = 0;
+    /* where its texels and CLUT lie in another's memory, the lender's handle
+     * the texture's drop gives back (textures.cpp), else null: it owns its
+     * texels */
+    void *lender = nullptr;
+    /* a place of its own in the GS's memory, above the VRAM manager's,
+     * taken at its first bind and never given up: the texture stays past
+     * the game's release */
+    bool fixed = false;
 };
 
 /* what a draw is drawn under: a strip's psp_state, or a batch's State */
@@ -326,6 +343,12 @@ struct Held {
      * the screens and the depth */
     std::vector<Texture *> resident;
     uint32_t vram_first = 0;
+    /* the fixed textures' room, from fixed_low to the top, and its blocks
+     * in use */
+    uint32_t fixed_low = VRAM_BLOCKS, fixed_blocks = 0;
+    /* lenders whose texels a stream unsent or sending may still read: their
+     * return waits for it, as texels' freeing does */
+    std::vector<void *> returns, returns_sent;
     /* figures for psp_draw_report */
     uint32_t pictures = 0, lost = 0, most_textures = 0, texture_bytes = 0;
     uint32_t most_queue = 0, most_blends = 0, blends_past = 0, mirrors = 0;
@@ -566,6 +589,11 @@ void send_stream(Held &r, bool last)
     }
     r.dying_sent.swap(r.dying);
     r.dying.clear();
+    for (void *lender : r.returns_sent) {
+        ps2_texture_returned(lender);
+    }
+    r.returns_sent.swap(r.returns);
+    r.returns.clear();
     r.uploads.clear();
     if (last) {
         *GS_CSR = 2;
@@ -664,11 +692,30 @@ bool highlights(const Draw &d)
     return d.offset && d.texture != nullptr && !d.decal && !d.blend;
 }
 
-/* the blocks a texture of w by h takes in the GS's memory. its pages,
- * 64 by 32 texels at 32 bits and 64 by 64 at 16, lie in rows of TBW, and
- * within a page its blocks lie out of order: a texture within one page
- * takes the blocks to the last it reaches */
-uint32_t blocks_of(uint32_t w, uint32_t h, bool wide)
+/* the GS's 4-bit and 8-bit formats, whose texels index a CLUT */
+constexpr uint32_t PSM_T8 = 0x13, PSM_T4 = 0x14;
+
+/* a format's bits a texel */
+uint32_t texel_bits(uint32_t psm)
+{
+    return psm == GS_PSM_CT32 ? 32 : psm == PSM_T8 ? 8 : psm == PSM_T4 ? 4 : 16;
+}
+
+/* the TBW of a texture w texels wide: 64 a unit, and for 4 and 8 bits,
+ * whose pages are 128 wide, an even count */
+uint32_t tbw_of(uint32_t w, uint32_t psm)
+{
+    uint32_t units = (w + 63) / 64;
+
+    return psm == PSM_T8 || psm == PSM_T4 ? std::max<uint32_t>(2, (units + 1) & ~1U) : std::max<uint32_t>(1, units);
+}
+
+/* the blocks a texture of w by h takes in the GS's memory. its pages lie in
+ * rows of TBW: 64 by 32 texels at 32 bits, 64 by 64 at 16, 128 by 64 at 8
+ * and 128 by 128 at 4. within a page its blocks lie out of order, 32 and 8
+ * bits' by one table and 16 and 4 bits' by another: a texture within one
+ * page takes the blocks to the last it reaches */
+uint32_t blocks_of(uint32_t w, uint32_t h, uint32_t psm)
 {
     static const uint8_t blocks32[4][8] = {{0, 1, 4, 5, 16, 17, 20, 21},
                                            {2, 3, 6, 7, 18, 19, 22, 23},
@@ -676,21 +723,34 @@ uint32_t blocks_of(uint32_t w, uint32_t h, bool wide)
                                            {10, 11, 14, 15, 26, 27, 30, 31}};
     static const uint8_t blocks16[8][4] = {{0, 2, 8, 10},    {1, 3, 9, 11},    {4, 6, 12, 14},   {5, 7, 13, 15},
                                            {16, 18, 24, 26}, {17, 19, 25, 27}, {20, 22, 28, 30}, {21, 23, 29, 31}};
-    uint32_t page_h = wide ? 32 : 64, block_w = wide ? 8 : 16;
+    bool table32 = psm == GS_PSM_CT32 || psm == PSM_T8;
+    uint32_t page_w = psm == PSM_T8 || psm == PSM_T4 ? 128 : 64;
+    uint32_t page_h = psm == GS_PSM_CT32 ? 32 : psm == PSM_T4 ? 128 : 64;
+    uint32_t block_w = page_w / (table32 ? 8 : 4), block_h = page_h / (table32 ? 4 : 8);
     uint32_t most = 0;
 
-    if (w >= 64 || h >= page_h) {
-        return (w + 63) / 64 * ((h + page_h - 1) / page_h) * 32;
+    if (w >= page_w || h >= page_h) {
+        return (w + page_w - 1) / page_w * ((h + page_h - 1) / page_h) * 32;
     }
-    for (uint32_t by = 0; by < (h + 7) / 8; by++) {
+    for (uint32_t by = 0; by < (h + block_h - 1) / block_h; by++) {
         for (uint32_t bx = 0; bx < (w + block_w - 1) / block_w; bx++) {
-            most = std::max<uint32_t>(most, (wide ? blocks32[by][bx] : blocks16[by][bx]) + 1U);
+            most = std::max<uint32_t>(most, (table32 ? blocks32[by][bx] : blocks16[by][bx]) + 1U);
         }
     }
     return most;
 }
 
-/* the first place that holds blocks at align, or -1 */
+/* a texture's blocks: its texels', then its CLUT's where it has one, 16
+ * colors as 8 by 2 and 256 as 16 by 16 at 32 bits */
+void size_texture(Texture *t)
+{
+    t->texel_blocks = blocks_of(t->gs.Width, t->gs.Height, t->gs.PSM);
+    t->blocks = t->texel_blocks +
+                (t->clut_colors == 0 ? 0 : t->clut_colors == 16 ? blocks_of(8, 2, GS_PSM_CT32) : blocks_of(16, 16, GS_PSM_CT32));
+}
+
+/* the first place that holds blocks at align below the fixed textures'
+ * room, or -1 */
 int32_t find_room(const Held &r, uint32_t blocks, uint32_t align)
 {
     uint32_t at = r.vram_first;
@@ -704,7 +764,7 @@ int32_t find_room(const Held &r, uint32_t blocks, uint32_t align)
         at = std::max(at, static_cast<uint32_t>(t->block) + t->blocks);
     }
     at = (at + align - 1) & ~(align - 1);
-    return at + blocks <= VRAM_BLOCKS ? static_cast<int32_t>(at) : -1;
+    return at + blocks <= r.fixed_low ? static_cast<int32_t>(at) : -1;
 }
 
 void unplace(Held &r, Texture *t)
@@ -719,6 +779,40 @@ void unplace(Held &r, Texture *t)
  * the first room for it, made by putting out the textures bound longest
  * ago. one bound earlier in the picture may go: the GS draws what used it
  * before the texels over it come. false where it can't fit */
+/* a picture's transfer to the GS's memory at block: its registers, then its
+ * bytes from the EE's memory */
+void transfer(Held &r, uint32_t block, uint32_t tbw, uint32_t psm, uint32_t w, uint32_t h, const void *bytes)
+{
+    uint64_t values[4] = {GS_SETREG_BITBLTBUF(0, 0, 0, block, tbw, psm), GS_SETREG_TRXPOS(0, 0, 0, 0, 0),
+                          GS_SETREG_TRXREG(w, h), 0};
+    uint64_t names[4] = {GS_BITBLTBUF, GS_TRXPOS, GS_TRXREG, GS_TRXDIR};
+
+    send_registers(r, values, names, 4);
+    send_texels(r, bytes, (w * h * texel_bits(psm) / 8 + 15) / 16);
+}
+
+/* a fixed texture's place: the room above the VRAM manager's, taken once,
+ * downward from the top. what lies there of the manager's goes out */
+int32_t place_fixed(Held &r, Texture *t)
+{
+    uint32_t align = t->blocks >= 32 ? 32 : 1;
+    uint32_t at = (r.fixed_low - t->blocks) & ~(align - 1);
+
+    if (r.fixed_low < t->blocks || at < r.vram_first + 1024) {
+        return -1;
+    }
+    for (size_t i = r.resident.size(); i-- > 0;) {
+        Texture *o = r.resident[i];
+
+        if (static_cast<uint32_t>(o->block) + o->blocks > at) {
+            unplace(r, o);
+        }
+    }
+    r.fixed_low = at;
+    r.fixed_blocks += t->blocks;
+    return static_cast<int32_t>(at);
+}
+
 bool place(Held &r, Texture *t)
 {
     t->used = r.pictures;
@@ -728,31 +822,41 @@ bool place(Held &r, Texture *t)
     uint32_t align = t->blocks >= 32 ? 32 : 1;
     int32_t at;
 
-    while ((at = find_room(r, t->blocks, align)) < 0) {
-        Texture *oldest = nullptr;
+    if (t->fixed) {
+        at = place_fixed(r, t);
+        if (at < 0) {
+            t->fixed = false;
+        }
+    }
+    if (!t->fixed) {
+        while ((at = find_room(r, t->blocks, align)) < 0) {
+            Texture *oldest = nullptr;
 
-        for (Texture *o : r.resident) {
-            if (o != t && (oldest == nullptr || o->used < oldest->used)) {
-                oldest = o;
+            for (Texture *o : r.resident) {
+                if (o != t && (oldest == nullptr || o->used < oldest->used)) {
+                    oldest = o;
+                }
             }
+            if (oldest == nullptr) {
+                return false;
+            }
+            unplace(r, oldest);
         }
-        if (oldest == nullptr) {
-            return false;
-        }
-        unplace(r, oldest);
     }
     t->block = at;
-    r.resident.insert(std::upper_bound(r.resident.begin(), r.resident.end(), t,
-                                       [](const Texture *a, const Texture *b) { return a->block < b->block; }),
-                      t);
-    /* the transfer's registers, then the texels */
-    uint64_t values[4] = {GS_SETREG_BITBLTBUF(0, 0, 0, static_cast<uint32_t>(at), t->gs.TBW, t->gs.PSM),
-                          GS_SETREG_TRXPOS(0, 0, 0, 0, 0), GS_SETREG_TRXREG(t->gs.Width, t->gs.Height), 0};
-    uint64_t names[4] = {GS_BITBLTBUF, GS_TRXPOS, GS_TRXREG, GS_TRXDIR};
-    uint32_t bytes = t->gs.Width * t->gs.Height * (t->gs.PSM == GS_PSM_CT32 ? 4 : 2);
+    if (!t->fixed) {
+        r.resident.insert(std::upper_bound(r.resident.begin(), r.resident.end(), t,
+                                           [](const Texture *a, const Texture *b) { return a->block < b->block; }),
+                          t);
+    }
+    /* the texels, then the CLUT after them */
+    transfer(r, static_cast<uint32_t>(at), t->gs.TBW, t->gs.PSM, t->gs.Width, t->gs.Height, t->gs.Mem);
+    if (t->clut_colors != 0) {
+        bool sixteen = t->clut_colors == 16;
 
-    send_registers(r, values, names, 4);
-    send_texels(r, t->gs.Mem, (bytes + 15) / 16);
+        transfer(r, static_cast<uint32_t>(at) + t->texel_blocks, 1, GS_PSM_CT32, sixteen ? 8 : 16, sixteen ? 2 : 16,
+                 t->clut);
+    }
     r.uploads.push_back(t);
     r.sends++;
     /* the GS reads the new texels after a TEXFLUSH, which the next TEX0
@@ -786,8 +890,12 @@ void apply(Held &r, const Draw &d)
         }
         unsigned int block = t->block >= 0 ? static_cast<unsigned>(t->block) : r.vram_first;
         int tfx = d.decal ? TFX_DECAL : highlights(d) ? TFX_HIGHLIGHT2 : TFX_MODULATE;
+        /* a CLUT's texture loads its CLUT, at 32 bits after its texels, as
+         * its TEX0 is set */
+        bool clut = t->clut_colors != 0;
 
-        tex0 = GS_SETREG_TEX0(block, t->gs.TBW, t->gs.PSM, t->tw, t->th, d.alpha ? 1 : 0, tfx, 0, 0, 0, 0, 0);
+        tex0 = GS_SETREG_TEX0(block, t->gs.TBW, t->gs.PSM, t->tw, t->th, d.alpha ? 1 : 0, tfx,
+                              clut ? block + t->texel_blocks : 0, 0, 0, 0, clut ? 1 : 0);
     }
     tex1 = GS_SETREG_TEX1(0, 0, d.linear ? 1 : 0, d.linear ? 1 : 0, 0, 0, 0);
     clamp = GS_SETREG_CLAMP(d.clamp_u ? 1 : 0, d.clamp_v ? 1 : 0, 0, 0, 0, 0);
@@ -1548,27 +1656,34 @@ Texture *mirrored(Held &r, Texture *t, int flip)
     bool mu = (flip & 1) != 0, mv = (flip & 2) != 0;
     uint32_t pw = t->gs.Width, ph = t->gs.Height;
     uint32_t w2 = mu ? pw * 2 : pw, h2 = mv ? ph * 2 : ph;
-    uint32_t texel = t->gs.PSM == GS_PSM_CT32 ? 4 : 2;
+    uint32_t bits = texel_bits(t->gs.PSM);
 
     /* a large texture's copy would take more of the EE's memory than its
      * mirror is worth: it repeats instead */
     if (w2 > SIDE_MOST || h2 > SIDE_MOST || pw > MIRROR_MOST || ph > MIRROR_MOST) {
         return t;
     }
-    uint8_t *texels = static_cast<uint8_t *>(memalign(128, w2 * h2 * texel));
+    uint8_t *texels = static_cast<uint8_t *>(memalign(128, w2 * h2 * bits / 8));
 
     if (texels == nullptr) {
         return t;
     }
     const uint8_t *from = reinterpret_cast<const uint8_t *>(t->gs.Mem);
 
+    memset(texels, 0, w2 * h2 * bits / 8);
     for (uint32_t y = 0; y < h2; y++) {
         uint32_t sy = y < ph ? y : 2 * ph - 1 - y;
 
         for (uint32_t x = 0; x < w2; x++) {
             uint32_t sx = x < pw ? x : 2 * pw - 1 - x;
+            uint32_t to = y * w2 + x, at = sy * pw + sx;
 
-            memcpy(texels + (y * w2 + x) * texel, from + (sy * pw + sx) * texel, texel);
+            if (bits == 4) {
+                /* two to a byte, the first in the low half */
+                texels[to / 2] |= static_cast<uint8_t>((from[at / 2] >> (4 * (at & 1)) & 15) << (4 * (to & 1)));
+            } else {
+                memcpy(texels + to * bits / 8, from + at * bits / 8, bits / 8);
+            }
         }
     }
     Texture *made = new Texture;
@@ -1576,9 +1691,12 @@ Texture *mirrored(Held &r, Texture *t, int flip)
     made->gs = t->gs;
     made->gs.Width = w2;
     made->gs.Height = h2;
-    made->gs.TBW = std::max<uint32_t>(1, w2 / 64);
+    made->gs.TBW = tbw_of(w2, t->gs.PSM);
     made->gs.Mem = reinterpret_cast<u32 *>(texels);
     made->gs.Vram = 0;
+    /* the copy's own texels, and its texture's CLUT, which outlives it */
+    made->clut = t->clut;
+    made->clut_colors = t->clut_colors;
     made->width = t->width;
     made->height = t->height;
     /* a texel's place over the copy's sides: u in 0 to 2 spans the copy */
@@ -1587,9 +1705,9 @@ Texture *mirrored(Held &r, Texture *t, int flip)
     made->tw = static_cast<uint8_t>(side_log2(w2));
     made->th = static_cast<uint8_t>(side_log2(h2));
     made->cuts = t->cuts;
-    made->blocks = blocks_of(w2, h2, made->gs.PSM == GS_PSM_CT32);
+    size_texture(made);
     FlushCache(0);
-    r.texture_bytes += w2 * h2 * texel;
+    r.texture_bytes += w2 * h2 * bits / 8;
     r.mirrors++;
     t->mirrored[flip - 1] = made;
     return made;
@@ -1975,6 +2093,8 @@ void keep_place(Held &r)
     }
 }
 
+uint32_t keep_texture(Held &r, Texture *made);
+
 /* a texture of texels laid out as head says (engine/ps2/texels.h), which
  * the raster keeps and frees with the texture: from the pack, or made here
  * of an image */
@@ -2000,7 +2120,7 @@ uint32_t add_texels(Held &r, const ps2::TexelsHead &head, void *texels)
     made->tw = head.tw;
     made->th = head.th;
     made->cuts = head.cuts != 0;
-    made->blocks = blocks_of(pw, ph, made->gs.PSM == GS_PSM_CT32);
+    size_texture(made);
     if (head.bytes > 512 * 1024) {
         fprintf(stderr, "sa1: a large texture, %ux%u at %u bits: %u bytes\n", static_cast<unsigned>(head.width),
                 static_cast<unsigned>(head.height), head.psm == ps2::PSM_32 ? 32U : 16U,
@@ -2008,6 +2128,43 @@ uint32_t add_texels(Held &r, const ps2::TexelsHead &head, void *texels)
     }
     FlushCache(0);
     r.texture_bytes += head.bytes;
+    return keep_texture(r, made);
+}
+
+/* a picture of a TIM2's whose texels and CLUT stay in its lender's memory
+ * (textures.cpp): the texture gives the lender back at its drop */
+uint32_t add_picture(Held &r, const ps2::Lent &lent)
+{
+    if (!r.opened || lent.texels == nullptr) {
+        return 0;
+    }
+    Texture *made = new Texture;
+
+    made->gs.Width = lent.side_w;
+    made->gs.Height = lent.side_h;
+    made->gs.PSM = lent.psm;
+    made->gs.TBW = tbw_of(lent.side_w, lent.psm);
+    made->gs.Mem = static_cast<u32 *>(const_cast<void *>(lent.texels));
+    made->gs.Filter = GS_FILTER_LINEAR;
+    made->width = lent.width;
+    made->height = lent.height;
+    made->su = static_cast<float>(lent.width) / lent.side_w;
+    made->sv = static_cast<float>(lent.height) / lent.side_h;
+    made->tw = static_cast<uint8_t>(side_log2(lent.side_w));
+    made->th = static_cast<uint8_t>(side_log2(lent.side_h));
+    made->cuts = lent.cuts;
+    made->clut = lent.clut;
+    made->clut_colors = lent.clut_colors;
+    made->lender = lent.lender;
+    made->fixed = lent.fixed;
+    size_texture(made);
+    r.texture_bytes += lent.side_w * lent.side_h * texel_bits(lent.psm) / 8;
+    return keep_texture(r, made);
+}
+
+/* a texture made, by its number, 1 and up */
+uint32_t keep_texture(Held &r, Texture *made)
+{
     for (size_t i = 0; i < r.textures.size(); i++) {
         if (r.textures[i] == nullptr) {
             r.textures[i] = made;
@@ -2042,7 +2199,7 @@ uint32_t add_image(Held &r, const Image &image)
 }
 
 /* a texture dropped: a stream unsent or sending may still send its texels,
- * so they're freed once it's sent */
+ * so they're freed once it's sent, or its lender given back then */
 void drop_texture(Held &r, Texture *t)
 {
     auto unsent = std::find(r.uploads.begin(), r.uploads.end(), t);
@@ -2052,8 +2209,14 @@ void drop_texture(Held &r, Texture *t)
     if (unsent != r.uploads.end()) {
         r.uploads.erase(unsent);
     }
-    r.texture_bytes -= t->gs.Width * t->gs.Height * (t->gs.PSM == GS_PSM_CT32 ? 4 : 2);
-    if (sending) {
+    r.texture_bytes -= t->gs.Width * t->gs.Height * texel_bits(t->gs.PSM) / 8;
+    if (t->lender != nullptr) {
+        if (sending) {
+            r.returns.push_back(t->lender);
+        } else {
+            ps2_texture_returned(t->lender);
+        }
+    } else if (sending) {
         r.dying.push_back(t->gs.Mem);
     } else {
         free(t->gs.Mem);
@@ -2068,6 +2231,11 @@ void free_texture(Held &r, uint32_t texture)
     }
     Texture *t = r.textures[texture - 1];
 
+    /* a fixed texture stays, its place and texels with it, for the next of
+     * the game's loads of it (textures.cpp keeps its number) */
+    if (t->fixed) {
+        return;
+    }
     for (Texture *m : t->mirrored) {
         if (m != nullptr) {
             drop_texture(r, m);
@@ -2091,6 +2259,12 @@ uint32_t psp_texture_add(const Image &image)
 uint32_t ps2_texture_add_texels(const ps2::TexelsHead &head, void *texels)
 {
     return add_texels(held, head, texels);
+}
+
+/* and a TIM2's picture, whose texels its lender keeps */
+uint32_t ps2_texture_add_picture(const ps2::Lent &lent)
+{
+    return add_picture(held, lent);
 }
 
 /* the PS2 reads no PVR's texels as they lie: each becomes an image first */

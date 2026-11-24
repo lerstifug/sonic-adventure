@@ -1,0 +1,20 @@
+# the TIM2 files of the PS2's textures that stay in memory from their first
+# read to the end of the run (engine/ps2/TEXTURES.md, engine/ps2/textures.cpp):
+# a line each, NAME TIER. the tiers:
+#
+#   memory  the file stays in EE memory, so the game's next load of it reads
+#           nothing
+#   fixed   as memory, and its textures keep one place in the GS's memory,
+#           sent once and never put out (the raster's CLUT stage; till then
+#           as memory)
+#
+# every stage start loads these again: the character, the regular sets of
+# objects and effects, the HUD, and the hints and emerald shards' glints
+SONIC        memory
+SON_EFF      memory
+OBJ_REGULAR  memory
+EFF_REGULAR  memory
+CON_REGULAR  fixed
+EXTRA        memory
+HINT         memory
+EME_KIRAN    memory

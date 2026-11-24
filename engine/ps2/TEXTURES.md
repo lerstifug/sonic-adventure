@@ -221,13 +221,38 @@ a second of decoding per large archive at load time.
      Emerald Coast's ground, and the worst fit.
    - **The old pack is still built,** since the runtime reads it until
      stage 2.
-2. **The loader:** reads `.tm2` files at `sa1_textures_loaded`, frees them
-   on release except the resident ones (`resident.txt`), and logs each
-   load's time and whether it came in a load pause. The pack stays as a
-   fallback behind a setting until this matches it.
-3. **The raster's CLUT formats:** 8-bit and 4-bit textures with their CLUTs
-   in the GS's memory (`TEX0`'s CBP, CPSM and CLD), placed and evicted with
-   their textures by the VRAM manager.
+2. **The loader** (`engine/ps2/textures.cpp`): **done**, together with stage
+   3, which it needed.
+   - **When:** at `sa1_textures_loaded`, records.c makes every texture of
+     the game's load. Each record's file id finds its `.tm2` through
+     `textures/files.txt`, which the converter writes, and the file is read
+     whole once for the load's list.
+   - **No copies:** textures draw from the file's bytes. A file closes when
+     its last texture goes, unless `textures/resident.txt` keeps it.
+   - **Logging:** each read is logged with its time, and "during play" or
+     "at a pause" by the game's own `stage_mode`.
+   - **Fallback:** the pack stands in for a texture no `.tm2` holds (none in
+     Emerald Coast), or for all textures under `textures pak` in the
+     settings.
+   - **Why stage 3 came with it:** making every loaded texture at load
+     (rather than at first draw), with interim 16-bit copies of the CLUT
+     textures, ran the heap out at Emerald Coast's load. Native CLUTs with
+     no copies fixed it.
+   - **Measured in Emerald Coast:** 37 reads, 4.4 MB in 564 ms, all at load
+     pauses. Every loaded texture is held, as on the Dreamcast: 3.2 MB, the
+     heap at 10.4 MB of 14 (9.3 MB with the pack, which held only drawn
+     textures, as 16-bit).
+3. **The raster's CLUT formats** (`gs.cpp`): **done.**
+   - **Placement:** 8-bit and 4-bit textures sit with their CLUTs after
+     their texels in the GS's memory (`TEX0`'s CBP and CLD). Page and block
+     sizes for each format are in `blocks_of`.
+   - **Uploads:** texels and CLUT go up from the file by DMA REF.
+   - **Mirrors:** a mirrored copy keeps its texture's CLUT.
+   - **Freeing:** a file's texture going while a stream may still read it
+     returns its file only once the stream is sent.
+   - **The fixed tier:** works as described above (`CON_REGULAR`): its
+     textures take room from the top of the GS's memory down, at their first
+     bind, and the raster keeps them past the game's releases.
 4. **Renderer stage 3, textures on the VU1 path:** UVs gathered with each
    corner, ST and Q out of `model.vsm`, highlights from the palette's offset
    half (already in VU1's memory), and the textured material rules of the
