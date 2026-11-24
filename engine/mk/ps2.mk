@@ -36,8 +36,12 @@ ifeq ($(wildcard $(PS2_CC)),)
 $(error $(PS2_CC): no EE compiler there; PS2DEV, from the environment, names ps2dev's toolchain)
 endif
 endif
-PS2_MK := engine/engine.mk engine/mk/play_math.mk engine/mk/native.mk engine/mk/ps2.mk
-PS2_NEEDS := $(PS2_MK) $(PS2)/request.txt
+# What the slice's outputs need of the makefiles: the request, and the
+# flags each compile takes, recorded at this file's end, so an edit of the
+# makefiles builds again only what a changed flag compiles. The links take
+# the link's command too. A change to a rule's recipe alone builds nothing
+# again: remove what it makes
+PS2_NEEDS := $(PS2)/request.txt $(PS2)/flags.txt
 PS2_GCC_INCLUDE := $(if $(PS2_GOALS),$(shell $(PS2_CC) -print-file-name=include 2> /dev/null))
 ifneq ($(PS2_GOALS),)
 $(call record,$(PS2)/request.txt,opt $(PS2_OPT) math $(PS2_MATH) gcc $(shell $(PS2_CC) --version 2> /dev/null))
@@ -121,7 +125,7 @@ PS2_HOST_CFLAGS := -std=gnu17 -O2 -G0 -DSA_SMALL -fno-strict-aliasing -ffp-contr
 	-D__ptr32= -D__uptr= -Umips -D_EE -Wno-format -Iengine/ps2 -Iengine/psp -Iengine/native -Iengine/sa1 \
 	-I$(ENGINE_INCLUDE) $(PLAY_MATH_INCLUDE) -I$(PS2_SDK)/ee/include -I$(PS2_SDK)/common/include
 $(eval $(call play_math,$(PS2)/obj/engine/numeric,$$(PS2_CC) -std=c17 -O2 -G0 $$(PLAY_MATH_INCLUDE),$(PS2_NEEDS),ps2))
-$(PS2)/asm.c: engine/tools/asm2c.py $(foreach f,$(NATIVE_ASM),$(firstword $(subst :, ,$f))) $(PS2_MK)
+$(PS2)/asm.c: engine/tools/asm2c.py $(foreach f,$(NATIVE_ASM),$(firstword $(subst :, ,$f))) $(PS2_NEEDS)
 	@$(call status,asm2c,$@)
 	$(Q)mkdir -p $(@D)
 	$(Q)python3 engine/tools/asm2c.py $@ $(NATIVE_ASM)
@@ -172,7 +176,7 @@ $(PS2)/obj/engine/sa1/%.o: engine/sa1/%.c $(PS2_NEEDS)
 $(PS2)/obj/engine/sa1/records.o: PS2_SINGLE := -include engine/psp/single.h -fsingle-precision-constant
 $(PS2)/obj/engine/sa1/movie.o: $(PL_MPEG_FETCHED)
 # The build's disc, as native.mk's table of it
-$(PS2)/disc.c: SHA256SUMS $(PS2_MK)
+$(PS2)/disc.c: SHA256SUMS $(PS2_NEEDS)
 	@$(call status,sums,$@)
 	$(Q)mkdir -p $(@D)
 	$(Q)awk 'BEGIN { print "#include \"native.h\"\nconst struct native_disc_sum native_disc_sums[] = {" } \
@@ -259,16 +263,17 @@ $(PS2)/stubs.o: $(PS2)/stubs.c $(PS2_NEEDS)
 # The program: an ELF at ps2sdk's linkfile's addresses, and beside it what
 # a run reads. A second name of 1ST_READ.BIN's is its symbol's by the link's
 # word. The adapter hangs on the calls psp.mk's PSP_WRAPS names, as on the
-# PSP, and the sound's atomics are libatomic's
+# PSP, the sound's atomics are libatomic's, and the pads are libpad's
+# (engine/ps2/window.cpp)
 PS2_WRAPS := pad_scan frame_wait njDrawTriangle3D njDrawPolygon2D njDrawLine3D njDrawTexture njDrawPolygon kmRender
 # ps2sdk's linkfile calls the code's start _ftext, which gdfs.c's test of a
 # read into code knows by the GNU name
 PS2_LINK = $(PS2_CXX) -T$(PS2_SDK)/ee/startup/linkfile -L$(PS2_SDK)/ee/lib -Wl,-zmax-page-size=128 \
 	-Wl,--defsym,__executable_start=_ftext \
 	$(PS2_WRAPS:%=-Wl$(comma)--wrap=%) $$(awk '{ printf " -Wl,--defsym,%s=%s", $$1, $$2 }' $(PS2)/aliases.txt) \
-	$(PS2_MAIN_OBJ) $(PS2)/stubs.o -L$(GSKIT)/lib -lgskit -ldmakit -lstdc++ -latomic -lm
+	$(PS2_MAIN_OBJ) $(PS2)/stubs.o -L$(GSKIT)/lib -lgskit -ldmakit -lpad -lstdc++ -latomic -lm
 $(PS2)/main.elf: $(PS2_MAIN_OBJ) $(PS2)/stubs.o $(NATIVE_PROGRAMS:%=$(PS2)/program-%.o) $(PS2_LINK_TOOLS) \
-		$(PS2_MEMORY) $(PS2_NEEDS)
+		$(PS2_MEMORY) $(PS2_NEEDS) $(PS2)/link.txt
 	@$(call status,link,$@)
 	$(Q)PS2DEV=$(PS2DEV) python3 engine/tools/ps2link.py link $(PS2) $(PS2)/placed.txt $(NATIVE_PROGRAMS) -- $(PS2_LINK)
 $(PS2)/game/SONICADV.ELF: $(PS2)/main.elf
@@ -281,10 +286,11 @@ $(PS2)/game/SONICADV.ELF: $(PS2)/main.elf
 # GS's texels ahead of time, so the console decodes none
 # (engine/tools/textures_pack.cpp)
 PS2_PACK_SOURCES := engine/tools/textures_pack.cpp engine/pc/pvr.cpp engine/pc/disc.cpp
-$(PS2)/textures_pack: $(PS2_PACK_SOURCES) engine/pc/pvr.h engine/pc/disc.h engine/ps2/texels.h $(PS2_MK)
+PS2_PACK_FLAGS := -std=gnu++17 -O2 -DSA_SMALL -I$(ENGINE_INCLUDE) -Iengine/pc -Iengine/ps2
+$(PS2)/textures_pack: $(PS2_PACK_SOURCES) engine/pc/pvr.h engine/pc/disc.h engine/ps2/texels.h $(PS2_NEEDS)
 	@$(call status,c++,$@)
 	$(Q)mkdir -p $(@D)
-	$(Q)$(CXX) -std=gnu++17 -O2 -DSA_SMALL -I$(ENGINE_INCLUDE) -Iengine/pc -Iengine/ps2 -o $@ $(PS2_PACK_SOURCES)
+	$(Q)$(CXX) $(PS2_PACK_FLAGS) -o $@ $(PS2_PACK_SOURCES)
 $(PS2)/game/textures.pak: $(PS2)/textures_pack SHA256SUMS
 	@$(call status,pack,$@)
 	$(Q)mkdir -p $(@D)
@@ -295,10 +301,12 @@ ps2: $(PS2)/game/SONICADV.ELF $(PS2)/game/textures.pak
 # PS2_OUT, from the environment, puts the slice's objects and links outside
 # the tree: on WSL, its own filesystem, where a file's every open and read
 # isn't a round trip to Windows, as /mnt/'s are. A run still reads its
-# folder in the tree, build/engine/ps2/game/, where an emulator on the
-# host finds it: the program, its programs and names go there after each
-# build, and the textures' index and pack where they changed
-PS2_RUN := build/engine/ps2/game
+# folder, build/engine/ps2/game/ in the tree or PS2_RUN from the
+# environment, where an emulator on the host finds it: the program, its
+# programs and names go there after each build, and the textures' index and
+# pack where they changed. engine/tools/ps2wsl.sh builds so from a copy of
+# the tree on WSL's own filesystem, into the Windows tree's folder
+PS2_RUN ?= build/engine/ps2/game
 ifneq ($(abspath $(PS2)),$(abspath build/engine/ps2))
 ps2: $(PS2_RUN)/SONICADV.ELF $(PS2_RUN)/textures.pak
 $(PS2_RUN)/SONICADV.ELF: $(PS2)/game/SONICADV.ELF
@@ -312,4 +320,11 @@ $(PS2_RUN)/textures.pak: $(PS2)/game/textures.pak
 	$(Q)mkdir -p $(@D)
 	$(Q)cp $(PS2)/game/textures.bin $(PS2_RUN)/textures.bin
 	$(Q)cp $< $@
+endif
+
+# The flags the compiles take and the link's command, as PS2_NEEDS says
+ifneq ($(PS2_GOALS),)
+$(call record,$(PS2)/flags.txt,game $(PS2_CFLAGS) host $(PS2_HOST_CFLAGS) adapter $(PS2_SA1_CFLAGS) c++ \
+	$(PS2_CXXFLAGS) pack $(PS2_PACK_FLAGS))
+$(call record,$(PS2)/link.txt,$(PS2_LINK))
 endif

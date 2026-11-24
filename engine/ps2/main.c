@@ -17,11 +17,12 @@
  * (engine/native/pads.c), trace 1 has the log name each file the game
  * opens and each program it loads, video 480p or 480i sets the screen's
  * mode, 480p by default, deflicker 0 turns 480i's flicker filter off, and
- * dither 0 the dither of the 16-bit screen.
+ * dither 0 the dither of the 16-bit screen, and vu 0 keeps every strip on
+ * the EE.
  *
  * the runner opens the engine, whose raster is the GS's (gs.cpp): the
- * adapter draws to it as the game calls. its window has no pads or sound
- * yet. the game reaches some memory by constant address: console_ram holds
+ * adapter draws to it as the game calls. its window reads the pads
+ * (window.cpp), and has no sound yet. the game reaches some memory by constant address: console_ram holds
  * those bytes (engine/psp/psp.h), and the link defines it
  * (engine/tools/ps2link.py) */
 #include <kernel.h>
@@ -151,6 +152,9 @@ void native_vsync(void)
     if (native_pace) {
         native_pace();
     }
+    /* the live pad, read once a vsync as the desktop's runner reads it: the
+     * game's own scan then takes the vsync's read (engine/native/pads.c) */
+    native_pads_vsync();
     if (vsync_function) {
         vsync_function();
     }
