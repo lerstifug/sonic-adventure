@@ -310,7 +310,7 @@ static inline void walk_corner(const struct walk_set *w, struct psp_corner *out,
      * easy and simple drawers or for a point a material takes whole */
     if (w->unlit_offset) {
         out->offset = walk_rgba(
-            palettes_words[SA_CAP_PALETTES_COUNT * SA_CAP_PALETTE_ENTRIES * 2 +
+            sa1_live_colors[SA_CAP_PALETTES_COUNT * SA_CAP_PALETTE_ENTRIES * 2 +
                            (i < SA_CAP_UNLIT_OFFSETS ? i : 0)]);
     } else if (w->whole || (w->mode != SA_SHADE_PALETTE &&
                             w->mode != SA_SHADE_LIGHTS)) {
@@ -360,7 +360,7 @@ static int walk_model(const NJS_MODEL *model, uint8_t mode,
     static uint8_t cuts[WALK_MATERIALS];
     const float *m = native_xmtrx();
     const uint32_t *words =
-        palettes_words + state->palette * SA_PALETTE_ENTRIES * 2;
+        sa1_live_colors + state->palette * SA_PALETTE_ENTRIES * 2;
     uint32_t points = (uint32_t)model->nbPoint;
     uint32_t count = materials_named(model);
     float light[3], eye[3], longest = 0.0F, far = 0.0F, radius;
@@ -470,7 +470,7 @@ static int walk_model(const NJS_MODEL *model, uint8_t mode,
 
                 offsets[i] =
                     pal < SA_CAP_PALETTES_COUNT
-                        ? walk_rgba(palettes_words[pal * SA_CAP_PALETTE_ENTRIES * 2 +
+                        ? walk_rgba(sa1_live_colors[pal * SA_CAP_PALETTE_ENTRIES * 2 +
                                                    (uint32_t)entry * 2 + 1])
                         : 0;
             }

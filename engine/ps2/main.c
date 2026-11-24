@@ -16,7 +16,8 @@
  * does, keys FILE plays FILE's script of keys in the pad's place
  * (engine/native/pads.c), trace 1 has the log name each file the game
  * opens and each program it loads, video 480p or 480i sets the screen's
- * mode, 480p by default, and deflicker 0 turns 480i's flicker filter off.
+ * mode, 480p by default, deflicker 0 turns 480i's flicker filter off, and
+ * dither 0 the dither of the 16-bit screen.
  *
  * the runner opens the engine, whose raster is the GS's (gs.cpp): the
  * adapter draws to it as the game calls. its window has no pads or sound
@@ -59,9 +60,16 @@ void syBtExit(void) __attribute__((noreturn));
  * 480i, whose flicker filter is on unless the settings turn it off */
 int ps2_interlaced = 0;
 int ps2_deflicker = 1;
+/* dither 0 turns off the GS's dither of the 16-bit screen: gradients then
+ * band, where the dither's pattern shows on a sharp display */
+int ps2_dither = 1;
 /* profile 1: the raster times its strips and binds, and the walk its
  * points' light, one by one */
 int ps2_profile = 0;
+/* the sampling profiler's (engine/ps2/profile.c) */
+static int sampling;
+void ps2_profile_start(void);
+void ps2_profile_write(const char *path);
 
 /* the FPU's FCR31 for the game, as the PSP's runner sets it. the EE always
  * rounds toward zero and flushes a denormal, as the SH-4's FPSCR has the
@@ -98,6 +106,9 @@ static void end_run(const char *why) __attribute__((noreturn));
 static void end_run(const char *why)
 {
     native_fpu_host();
+    if (sampling) {
+        ps2_profile_write("profile.bin");
+    }
     native_report(why);
     native_hook_run_end();
     if (native_play_close) {
@@ -204,8 +215,17 @@ static int take_target(const char *name, const char *value)
         ps2_deflicker = atoi(value);
         return 1;
     }
+    if (!strcmp(name, "dither")) {
+        ps2_dither = atoi(value);
+        return 1;
+    }
     if (!strcmp(name, "profile")) {
         ps2_profile = atoi(value);
+        return 1;
+    }
+    /* sample 1: the sampling profiler (profile.c) */
+    if (!strcmp(name, "sample")) {
+        sampling = atoi(value);
         return 1;
     }
     return 0;
@@ -280,6 +300,9 @@ int main(int argc, char **argv)
     native_asm_init();
     native_threads_place(game_stacks + GAME_STACK_SIZE);
     native_threads_reserve();
+    if (sampling) {
+        ps2_profile_start();
+    }
     fprintf(stderr, "sa1: the game starts\n");
     native_run_main(game_stacks, GAME_STACK_SIZE);
     end_run("main returned");

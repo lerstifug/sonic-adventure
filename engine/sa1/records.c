@@ -1877,11 +1877,15 @@ void sa1_record_model(const NJS_MODEL *model, uint8_t mode,
     }
     struct draw_state state = state_now(header, attrs);
 
+#ifndef SA_SMALL
     if (mode == SA_SHADE_PALETTE) {
         palettes_drawn(state.palette, model->nbPoint);
     }
+#endif
 #ifdef SA_SMALL
-    /* the walk draws it now, or the picture goes without it */
+    /* the walk draws it now, or the picture goes without it. it reads the
+     * palettes as they stand, at the call, as the Dreamcast's walk does:
+     * no version of them goes to a record, so none is snapped first */
     (void)part;
     (void)reads;
     (void)draw;

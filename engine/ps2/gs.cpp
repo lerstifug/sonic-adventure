@@ -68,6 +68,8 @@ extern "C" uint32_t ps2_walk_load_us, ps2_walk_light_us;
  * 480p, the default, 1 for 480i, and in 480i whether the merge circuit
  * filters the flicker, each line shown with half of the line below */
 extern "C" int ps2_interlaced, ps2_deflicker;
+/* whether the GS dithers the 16-bit screen (engine/ps2/main.c's dither) */
+extern "C" int ps2_dither;
 /* whether the run times the raster's strips and binds one by one, as the
  * settings' profile 1 asks: the clock takes its own time at each */
 extern "C" int ps2_profile;
@@ -182,10 +184,12 @@ struct Sent {
     uint8_t f;
 };
 
+/* a triangle that waits for the picture's sort: its draw, its key of depth,
+ * and its corners, the three from first in the picture's blend corners */
 struct Blend {
     Draw d;
-    float depth;
-    Sent t[3];
+    uint32_t key;
+    uint32_t first;
 };
 
 struct Placed {
@@ -206,6 +210,10 @@ struct Fog {
     float density = 0.0F;
     uint8_t table[128][2]{}; /* each entry's high and low */
     uint32_t color = 0;
+    /* the GS's fog for 1/z times the density, held to 1 to 256: by the
+     * value's exponent, 0 to 7, then its mantissa's top 7 bits, each the
+     * table's fog at the step's middle, made as the picture opens */
+    uint8_t gs[8 << 7]{};
 };
 
 struct Held {
@@ -234,12 +242,23 @@ struct Held {
     std::vector<Corner> cut_in, cut_out;
     std::vector<Sent> sent_corners;
     std::vector<uint8_t> made_texels; /* an image's texels, as made */
+    /* a cut strip's triangles, kept from call to call: each new vector a
+     * call made would take the C library's lock, a system call each */
+    std::vector<psp_corner> cut_strip;
+    /* pictures opened over one still open, whose commands went unsent */
+    uint32_t taken_back = 0;
     /* a draw's corners' sides, the indices of its triangles kept, a list's
      * own order, and a strip's triangles */
     std::vector<uint32_t> masks, kept_index, order, strip_index;
+    /* the waiting blends' corners, three to a blend, and their order */
+    std::vector<Sent> blend_corners;
+    std::vector<uint32_t> blend_order;
     /* the texture last bound this picture: another bind of it sends
      * nothing, so it binds once until another binds */
     const Texture *bound = nullptr;
+    /* the screen buffer the open picture draws into, 0 or 1: the other
+     * shows, or shows from the next blank (flip_at_blank) */
+    uint32_t draw_buffer = 0;
     /* the textures bound this picture. a picture dropped takes its
      * commands back, the sends of their texels among them, so the manager
      * hears they lie in its memory no more */
@@ -266,6 +285,20 @@ uint32_t bits(float f)
 
     memcpy(&b, &f, sizeof b);
     return b;
+}
+
+/* a depth's key for the blends' sort. a positive float's bits order as its
+ * value does, so its top bits past 1.0's are keys in its order, fine near
+ * the eye and coarser far from it: 2^-9 of a depth's own size apart. a
+ * depth past the last key's takes the last */
+constexpr uint32_t DEPTH_KEYS = 1U << 13;
+
+uint32_t depth_key(float depth)
+{
+    uint32_t b = bits(depth < 1.0F ? 1.0F : depth);
+    uint32_t key = (b - 0x3f800000U) >> 14;
+
+    return key < DEPTH_KEYS ? key : DEPTH_KEYS - 1;
 }
 
 uint32_t side_log2(uint32_t n)
@@ -528,9 +561,13 @@ uint8_t fog_of(const Held &r, const Draw &d, const Corner &v, float q)
 
     switch (d.fog) {
     case SA_FOG_TABLE:
-    case SA_FOG_TABLE2:
-        alpha = fog_alpha(r.fog, q);
-        break;
+    case SA_FOG_TABLE2: {
+        float z = q * r.fog.density;
+        uint32_t b = bits(z < 1.0F ? 1.0F : z > 255.9999F ? 255.9999F : z);
+
+        /* the exponent past 1.0's and the mantissa's top 7 bits */
+        return r.fog.gs[(b - 0x3f800000U) >> 16];
+    }
     case SA_FOG_VERTEX:
         alpha = v.fog;
         break;
@@ -784,10 +821,11 @@ void send_draw(Held &r, const Draw &d, const Screen &s, const Corner *corners, u
                     Blend bl;
 
                     bl.d = d;
-                    bl.t[0] = pool[t0];
-                    bl.t[1] = pool[t1];
-                    bl.t[2] = pool[t2];
-                    bl.depth = (bl.t[0].v.z + bl.t[1].v.z + bl.t[2].v.z) * (1.0F / 3.0F);
+                    bl.first = static_cast<uint32_t>(r.blend_corners.size());
+                    bl.key = depth_key((pool[t0].v.z + pool[t1].v.z + pool[t2].v.z) * (1.0F / 3.0F));
+                    r.blend_corners.push_back(pool[t0]);
+                    r.blend_corners.push_back(pool[t1]);
+                    r.blend_corners.push_back(pool[t2]);
                     r.blends.push_back(bl);
                     continue;
                 }
@@ -827,30 +865,54 @@ void send_triangles(Held &r, const Draw &d, const Screen &s, const Corner *tri, 
 void draw_blends(Held &r)
 {
     std::vector<Blend> &b = r.blends;
-    std::vector<Sent> &run = r.sent_corners;
+    std::vector<uint32_t> &order = r.blend_order, &run = r.kept_index;
+    static uint32_t counts[DEPTH_KEYS];
+    uint32_t n = static_cast<uint32_t>(b.size());
 
-    if (b.empty()) {
+    if (n == 0) {
         return;
     }
-    r.most_blends = std::max<uint32_t>(r.most_blends, static_cast<uint32_t>(b.size()));
-    std::stable_sort(b.begin(), b.end(), [](const Blend &x, const Blend &y) { return x.depth > y.depth; });
-    for (size_t i = 0; i < b.size();) {
-        size_t j = i;
+    r.most_blends = std::max<uint32_t>(r.most_blends, n);
+    /* a counting sort by key, the farthest first: each key's count, then
+     * the place each key starts at, the largest keys from 0, then the
+     * triangles in their keys' places, each key's in the order they came */
+    memset(counts, 0, sizeof counts);
+    for (const Blend &bl : b) {
+        counts[bl.key]++;
+    }
+    for (uint32_t k = DEPTH_KEYS, at = 0; k-- > 0;) {
+        uint32_t here = counts[k];
+
+        counts[k] = at;
+        at += here;
+    }
+    order.resize(n);
+    for (uint32_t i = 0; i < n; i++) {
+        order[counts[b[i].key]++] = i;
+    }
+    for (uint32_t i = 0; i < n;) {
+        const Draw &d = b[order[i]].d;
+        uint32_t j = i;
 
         run.clear();
-        while (j < b.size() && b[j].d.same(b[i].d)) {
-            run.insert(run.end(), b[j].t, b[j].t + 3);
+        while (j < n && b[order[j]].d.same(d)) {
+            uint32_t first = b[order[j]].first;
+
+            run.push_back(first);
+            run.push_back(first + 1);
+            run.push_back(first + 2);
             j++;
         }
-        uint32_t n = static_cast<uint32_t>(run.size());
+        uint32_t corners = static_cast<uint32_t>(run.size());
 
-        send_packet(r, b[i].d, run.data(), nullptr, n, 0);
-        if (lit_offset(b[i].d, run.data(), nullptr, n)) {
-            send_packet(r, b[i].d, run.data(), nullptr, n, 1);
+        send_packet(r, d, r.blend_corners.data(), run.data(), corners, 0);
+        if (lit_offset(d, r.blend_corners.data(), run.data(), corners)) {
+            send_packet(r, d, r.blend_corners.data(), run.data(), corners, 1);
         }
         i = j;
     }
     b.clear();
+    r.blend_corners.clear();
 }
 
 /* a full-screen rectangle of color at depth z, under a depth test */
@@ -888,20 +950,38 @@ void fill(Held &r, uint32_t argb, uint32_t z, uint64_t ztst, bool zwrite)
  * gsKit drives the first circuit's twin, read circuit 2, at each flip, from
  * the buffer it showed before the flip's toggle, so the filter follows it
  * there after each */
-void deflicker(Held &r)
+void show_buffer(GSGLOBAL *gs, uint32_t buffer)
 {
-    GSGLOBAL *gs = r.gs;
+    uint32_t at = gs->ScreenBuffer[buffer & 1];
 
-    if (!ps2_interlaced || !ps2_deflicker) {
-        return;
+    GS_SET_DISPFB2(at / 8192, gs->Width / 64, gs->PSM, 0, 0);
+    if (ps2_interlaced && ps2_deflicker) {
+        GS_SET_DISPFB1(at / 8192, gs->Width / 64, gs->PSM, 0, 1);
+        GS_SET_DISPLAY1(gs->StartX + gs->StartXOffset, gs->StartY + gs->StartYOffset, gs->MagH, gs->MagV,
+                        gs->DW - 1, gs->DH - 1);
+        /* both circuits on, merged by the fixed alpha, half of each */
+        GS_SET_PMODE(1, 1, 1, 0, 0, 0x80);
     }
-    uint32_t shown = gs->ScreenBuffer[(gs->ActiveBuffer ^ 1) & 1];
+}
 
-    GS_SET_DISPFB1(shown / 8192, gs->Width / 64, gs->PSM, 0, 1);
-    GS_SET_DISPLAY1(gs->StartX + gs->StartXOffset, gs->StartY + gs->StartYOffset, gs->MagH, gs->MagV,
-                    gs->DW - 1, gs->DH - 1);
-    /* both circuits on, merged by the fixed alpha, half of each */
-    GS_SET_PMODE(1, 1, 1, 0, 0, 0x80);
+/* the flip, at the vertical blank, by its interrupt: a picture's commands
+ * go to the GS at the picture's end, and the buffer they draw shows at the
+ * next blank, while the EE goes on to the next picture. it draws into the
+ * other buffer, which no command reaches before that picture's end. that
+ * picture's end waits for the flip only where it comes before the blank,
+ * so the EE waits for the display only when it draws faster than it shows.
+ * the GS's display circuits show from the blank, so no picture tears */
+volatile int32_t flip_pending = -1;
+GSGLOBAL *flip_gs;
+
+int flip_at_blank(int)
+{
+    if (flip_pending >= 0 && flip_gs != nullptr) {
+        show_buffer(flip_gs, static_cast<uint32_t>(flip_pending));
+        flip_pending = -1;
+    }
+    ExitHandler();
+    return 0;
 }
 
 void open_screen(Held &r)
@@ -927,13 +1007,23 @@ void open_screen(Held &r)
     gs->ZBuffering = GS_SETTING_ON;
     gs->DoubleBuffering = GS_SETTING_ON;
     gs->PrimAlphaEnable = GS_SETTING_ON;
-    gs->Dithering = GS_SETTING_ON;
+    /* the screen holds 5 bits of each of the three: the dither spreads the
+     * rest over a 4 by 4 pattern, which a CRT blurs and a sharp display
+     * shows. off, a gradient bands instead */
+    gs->Dithering = ps2_dither ? GS_SETTING_ON : GS_SETTING_OFF;
     gsKit_init_screen(gs);
     gsKit_mode_switch(gs, GS_ONESHOT);
     gsKit_TexManager_init(gs);
+    /* the first picture draws into buffer 0 while 1 shows. gsKit's own
+     * flip, which waits for the blank, goes unused */
+    r.draw_buffer = 0;
+    show_buffer(gs, 1);
+    flip_gs = gs;
+    gsKit_add_vsync_handler(flip_at_blank);
     r.gs = gs;
     r.kept = static_cast<psp_corner *>(memalign(64, KEPT_CORNERS * sizeof(psp_corner)));
     r.blends.reserve(BLENDS_MOST);
+    r.blend_corners.reserve(3 * BLENDS_MOST);
     r.opened = r.kept != nullptr;
     fprintf(stderr, "sa1: the GS's screen is %dx%d, %s, %u bytes of its memory free for textures\n", SCREEN_W,
             screen_height(), ps2_interlaced ? (ps2_deflicker ? "480i, its flicker filtered" : "480i") : "480p",
@@ -965,12 +1055,25 @@ void read_fog(Held &r)
         r.fog.table[i][0] = static_cast<uint8_t>(entry >> 8);
         r.fog.table[i][1] = static_cast<uint8_t>(entry);
     }
+    /* the GS's fog at each step's middle, as fog_alpha finds the PowerVR's
+     * for that 1/z times the density */
+    for (uint32_t i = 0; i < sizeof r.fog.gs; i++) {
+        float z;
+        uint32_t b = 0x3f800000U + (i << 16) + (1U << 15);
+
+        memcpy(&z, &b, sizeof z);
+        float alpha = fog_alpha(r.fog, r.fog.density != 0.0F ? z / r.fog.density : 0.0F);
+
+        alpha = alpha < 0.0F ? 0.0F : alpha > 1.0F ? 1.0F : alpha;
+        r.fog.gs[i] = static_cast<uint8_t>(255.0F - alpha * 255.0F + 0.5F);
+    }
 }
 
 /* take back the open picture's commands: what they would have sent of a
  * texture's texels goes unsent, so the manager sends it at its next bind */
 void take_back(Held &r)
 {
+    r.taken_back++;
     gsKit_queue_reset(r.gs->CurQueue);
     for (Texture *t : r.binds) {
         gsKit_TexManager_invalidate(r.gs, &t->gs);
@@ -995,11 +1098,14 @@ void open_picture(Held &r)
         /* the alpha bits of a 16-bit texel, clear and solid, and the fog's
          * color, the PowerVR's ARGB as the GS's RGB */
         uint32_t c = r.fog.color;
-        uint64_t values[2] = {static_cast<uint64_t>(0x80) << 32,
-                              static_cast<uint64_t>(c >> 16 & 0xff) | (c >> 8 & 0xff) << 8 | (c & 0xff) << 16};
-        uint64_t names[2] = {GS_TEXA, GS_FOGCOL_REG};
+        /* and the buffer the picture draws into, the one not showing */
+        uint64_t values[3] = {static_cast<uint64_t>(0x80) << 32,
+                              static_cast<uint64_t>(c >> 16 & 0xff) | (c >> 8 & 0xff) << 8 | (c & 0xff) << 16,
+                              GS_SETREG_FRAME(r.gs->ScreenBuffer[r.draw_buffer & 1] / 8192, r.gs->Width / 64,
+                                              r.gs->PSM, 0)};
+        uint64_t names[3] = {GS_TEXA, GS_FOGCOL_REG, GS_FRAME_1};
 
-        send_registers(r, values, names, 2);
+        send_registers(r, values, names, 3);
     }
     /* the picture's color, the last one the game gave, at the farthest
      * depth: what draws no depth, a sky among them, then stays over it */
@@ -1015,6 +1121,7 @@ void open_picture(Held &r)
     r.places.clear();
     r.later.clear();
     r.blends.clear();
+    r.blend_corners.clear();
     r.kept_used = 0;
 }
 
@@ -1455,9 +1562,13 @@ bool psp_submit(const PictureUniform &picture, uint32_t clear, const std::vector
     r.most_queue = std::max<uint32_t>(r.most_queue, QUEUE_BYTES - queue_left(r));
     uint32_t made = sceKernelGetSystemTimeLow();
 
+    /* the last picture's flip first: its buffer is the one this picture's
+     * commands draw into while it shows, until the blank */
+    while (flip_pending >= 0) {
+    }
     gsKit_queue_exec(r.gs);
-    gsKit_sync_flip(r.gs);
-    deflicker(r);
+    flip_pending = static_cast<int32_t>(r.draw_buffer);
+    r.draw_buffer ^= 1;
     gsKit_TexManager_nextFrame(r.gs);
     r.binds.clear();
     r.bound = nullptr;
@@ -1477,7 +1588,7 @@ bool psp_submit(const PictureUniform &picture, uint32_t clear, const std::vector
                 static_cast<unsigned>(ps2_walk_load_us - r.picture_load_us), static_cast<unsigned>(mallinfo().uordblks),
                 static_cast<unsigned>(r.texture_bytes),
                 static_cast<unsigned>(r.sent_corners.capacity() * sizeof(Sent) + r.cut_in.capacity() * sizeof(Corner) +
-                                      r.blends.capacity() * sizeof(Blend)));
+                                      r.blends.capacity() * sizeof(Blend) + r.blend_corners.capacity() * sizeof(Sent)));
     }
     r.make_us += made - r.made_since;
     r.gs_us += shown - made;
@@ -1487,13 +1598,15 @@ bool psp_submit(const PictureUniform &picture, uint32_t clear, const std::vector
         fprintf(stderr,
                 "sa1: the GS's last %u pictures: %u triangles, %u us on the EE, %u of them the raster's "
                 "strips, %u its binds, which sent %u textures, %u the walk's textures and %u its points' "
-                "light, and %u us on the GS each; %u bytes of the heap in use, %u of them textures\n",
+                "light, and %u us on the GS each; %u bytes of the heap in use, %u of them textures; %u "
+                "pictures taken back\n",
                 static_cast<unsigned>(r.timed), static_cast<unsigned>(r.triangles / r.timed),
                 static_cast<unsigned>(r.make_us / r.timed), static_cast<unsigned>(r.strip_us / r.timed),
                 static_cast<unsigned>(r.bind_us / r.timed), static_cast<unsigned>(r.sends / r.timed),
                 static_cast<unsigned>(ps2_walk_load_us / r.timed), static_cast<unsigned>(ps2_walk_light_us / r.timed),
                 static_cast<unsigned>(r.gs_us / r.timed), static_cast<unsigned>(mallinfo().uordblks),
-                static_cast<unsigned>(r.texture_bytes));
+                static_cast<unsigned>(r.texture_bytes), static_cast<unsigned>(r.taken_back));
+        r.taken_back = 0;
         ps2_walk_load_us = ps2_walk_light_us = 0;
         r.bind_us = 0;
         r.sends = 0;
@@ -1683,7 +1796,9 @@ extern "C" void psp_draw_cut(const struct psp_corner *corners, uint32_t count, i
                              const struct psp_state *later, float depth)
 {
     pc::Held &r = held;
-    std::vector<psp_corner> tri;
+    std::vector<psp_corner> &tri = r.cut_strip;
+
+    tri.clear();
 
     if (!r.picture || count < 3) {
         return;
@@ -1720,6 +1835,7 @@ extern "C" void psp_picture_drop(void)
     r.picture = false;
     r.later.clear();
     r.blends.clear();
+    r.blend_corners.clear();
     r.kept_used = 0;
 }
 

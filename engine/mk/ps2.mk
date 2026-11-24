@@ -284,3 +284,25 @@ $(PS2)/game/textures.pak: $(PS2)/textures_pack SHA256SUMS
 	$(Q)$< $(abspath orig) $(abspath $(@D))
 $(PS2)/game/textures.bin: $(PS2)/game/textures.pak
 ps2: $(PS2)/game/SONICADV.ELF $(PS2)/game/textures.pak
+
+# PS2_OUT, from the environment, puts the slice's objects and links outside
+# the tree: on WSL, its own filesystem, where a file's every open and read
+# isn't a round trip to Windows, as /mnt/'s are. A run still reads its
+# folder in the tree, build/engine/ps2/game/, where an emulator on the
+# host finds it: the program, its programs and names go there after each
+# build, and the textures' index and pack where they changed
+PS2_RUN := build/engine/ps2/game
+ifneq ($(abspath $(PS2)),$(abspath build/engine/ps2))
+ps2: $(PS2_RUN)/SONICADV.ELF $(PS2_RUN)/textures.pak
+$(PS2_RUN)/SONICADV.ELF: $(PS2)/game/SONICADV.ELF
+	@$(call status,copy,$(PS2_RUN))
+	$(Q)mkdir -p $(PS2_RUN)/programs
+	$(Q)cp $(PS2)/game/names.bin $(PS2_RUN)/names.bin
+	$(Q)cp -u $(PS2)/game/programs/*.BIN $(PS2_RUN)/programs/
+	$(Q)cp $< $@
+$(PS2_RUN)/textures.pak: $(PS2)/game/textures.pak
+	@$(call status,copy,$@)
+	$(Q)mkdir -p $(@D)
+	$(Q)cp $(PS2)/game/textures.bin $(PS2_RUN)/textures.bin
+	$(Q)cp $< $@
+endif
