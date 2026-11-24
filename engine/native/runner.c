@@ -510,6 +510,28 @@ int main(int argc, char **argv)
     }
     native_disc =
         front ? settings_disc ? settings_disc : NATIVE_BUILD_DISC : argv[1];
+#ifdef _WIN32
+    /* with no disc named, the folder the game lies in may hold the disc */
+    if (front && !settings_disc) {
+        static char here[MAX_PATH + 16];
+        DWORD length = GetModuleFileNameA(NULL, here, MAX_PATH);
+        char *slash;
+
+        while (length && here[length - 1] != '\\' && here[length - 1] != '/') {
+            length--;
+        }
+        if (length) {
+            here[length - 1] = 0;
+            slash = here + length - 1;
+            snprintf(slash, 16, "/1ST_READ.BIN");
+            if ((first = fopen(here, "rb"))) {
+                fclose(first);
+                *slash = 0;
+                native_disc = here;
+            }
+        }
+    }
+#endif
     if (!(first = native_disc_file("1ST_READ.BIN"))) {
         snprintf(words, sizeof words,
                  "no disc at %s: %s%s names the directory that holds the "
