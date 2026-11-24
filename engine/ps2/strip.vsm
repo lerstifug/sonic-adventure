@@ -1,0 +1,144 @@
+; the PS2's VU1 program for a strip (engine/ps2/gs.cpp's VU1 path): a batch
+; of a strip's corners, each carried by the model's matrix to view space,
+; projected, lit, textured and fogged as the EE's raster would, and sent to
+; the GS as one triangle strip by XGKICK.
+;
+; VU1's memory: qwords 0 to 63 hold the picture's fog table, the GS's fog
+; for each step of the square root of 1/z times the density, in x, from
+; 1 to 16 by quarters. from 64, two buffers of 480 qwords take turns
+; (VIF's BASE and OFFSET), and XTOP gives this batch's:
+;
+;   0       the GIF tag of the strip: PRE, PRIM, PACKED, ST RGBAQ XYZF2
+;   1       x: the corners' count, an integer
+;   2-5     the model's matrix, Ninja's rows: a point is a row times it
+;   6       the screen's scale: focal x, focal y, the depth's most, 0
+;   7       its bias: center x and y, as the GS's pixels place them
+;   8       the color's scale: red, green, blue and alpha's, each of 1
+;   9       the texture's scale: u and v of the stored sides, over 255
+;   10      density, fogged (0 or 1), 0, highlighted (0 or 1)
+;   11      4.0, 255.99, 255 times one less fogged, one less highlighted
+;   12-     the corners, four qwords each, as the VIF unpacks them: the
+;           point (x, y, z floats), u and v (integers), the color (red,
+;           green, blue, alpha, integers of 255), the offset (the same)
+;   12+4n   the strip as the GS takes it: the GIF tag, then for each
+;           corner ST (with Q), RGBAQ and XYZF2: RGBAQ takes the Q of the ST
+;           before it, so ST goes first
+;
+; written for clarity over speed: the VU stalls on each FMAC result a later
+; instruction reads, and WAITQ takes each division and square root
+        .vu
+        .align 4
+        .global VU1Strip_CodeStart
+        .global VU1Strip_CodeEnd
+VU1Strip_CodeStart:
+        NOP                     xtop VI02
+        NOP                     NOP
+        NOP                     ilw.x VI03, 1(VI02)
+        NOP                     lq VF01, 2(VI02)
+        NOP                     lq VF02, 3(VI02)
+        NOP                     lq VF03, 4(VI02)
+        NOP                     lq VF04, 5(VI02)
+        NOP                     lq VF05, 6(VI02)
+        NOP                     lq VF06, 7(VI02)
+        NOP                     lq VF07, 8(VI02)
+        NOP                     lq VF08, 9(VI02)
+        NOP                     lq VF09, 10(VI02)
+        NOP                     lq VF20, 11(VI02)
+        NOP                     lq VF21, 0(VI02)
+        NOP                     iaddiu VI04, VI02, 12
+        NOP                     iadd VI05, VI03, VI03
+        NOP                     iadd VI05, VI05, VI05
+        NOP                     iadd VI05, VI05, VI04
+        NOP                     NOP
+        NOP                     sq VF21, 0(VI05)
+        NOP                     iaddiu VI06, VI05, 1
+strip_corner:
+        NOP                     lq VF10, 0(VI04)
+        NOP                     lq VF12, 1(VI04)
+        NOP                     lq VF13, 2(VI04)
+        NOP                     lq VF14, 3(VI04)
+        mulax ACC, VF01, VF10x  NOP
+        madday ACC, VF02, VF10y NOP
+        maddaz ACC, VF03, VF10z NOP
+        maddw VF11, VF04, VF00w NOP
+        itof0 VF12, VF12        NOP
+        itof0 VF13, VF13        NOP
+        itof0 VF14, VF14        NOP
+        NOP                     NOP
+        NOP                     NOP
+        NOP                     div Q, VF00w, VF11z
+        mul.xy VF12, VF12, VF08 NOP
+        mul VF13, VF13, VF07    NOP
+        mul.xy VF15, VF11, VF05 NOP
+        maxy.x VF17, VF14, VF14y NOP
+        maxz.x VF17, VF17, VF14z NOP
+        mulaw.w ACC, VF13, VF20w NOP
+        maddx.w VF13, VF09, VF17x NOP
+        NOP                     waitq
+        mulq.xy VF12, VF12, Q   NOP
+        addq.z VF12, VF00, Q    NOP
+        mulq.xy VF15, VF15, Q   NOP
+        mulq.z VF15, VF05, Q    NOP
+        mulq.x VF16, VF09, Q    NOP
+        add.xy VF15, VF15, VF06 NOP
+        ftoi0 VF13, VF13        NOP
+        maxw.x VF16, VF16, VF00w NOP
+        miniy.x VF16, VF16, VF20y NOP
+        NOP                     NOP
+        NOP                     NOP
+        NOP                     NOP
+        NOP                     sqrt Q, VF16x
+        NOP                     waitq
+        addq.x VF18, VF00, Q    NOP
+        NOP                     NOP
+        NOP                     NOP
+        NOP                     NOP
+        mulx.x VF18, VF18, VF20x NOP
+        NOP                     NOP
+        NOP                     NOP
+        NOP                     NOP
+        ftoi0.x VF18, VF18      NOP
+        NOP                     NOP
+        NOP                     NOP
+        NOP                     NOP
+        NOP                     mtir VI07, VF18x
+        NOP                     NOP
+        NOP                     NOP
+        NOP                     lq.x VF19, 0(VI07)
+        NOP                     NOP
+        NOP                     NOP
+        NOP                     NOP
+        muly.x VF19, VF19, VF09y NOP
+        addw.w VF15, VF00, VF00w NOP
+        addz.x VF19, VF19, VF20z NOP
+        NOP                     NOP
+        NOP                     NOP
+        NOP                     NOP
+        addx.w VF15, VF15, VF19x NOP
+        NOP                     NOP
+        NOP                     NOP
+        NOP                     NOP
+        subw.w VF15, VF15, VF00w NOP
+        subw.w VF15, VF15, VF00w NOP
+        NOP                     NOP
+        NOP                     NOP
+        NOP                     NOP
+        ftoi4 VF15, VF15        NOP
+        NOP                     NOP
+        NOP                     NOP
+        NOP                     NOP
+        NOP                     sq VF12, 0(VI06)
+        NOP                     sq VF13, 1(VI06)
+        NOP                     sq VF15, 2(VI06)
+        NOP                     iaddiu VI06, VI06, 3
+        NOP                     iaddiu VI04, VI04, 4
+        NOP                     isubiu VI03, VI03, 1
+        NOP                     NOP
+        NOP                     NOP
+        NOP                     ibne VI03, VI00, strip_corner
+        NOP                     NOP
+        NOP                     xgkick VI05
+        NOP[E]                  NOP
+        NOP                     NOP
+        .align 4
+VU1Strip_CodeEnd:
