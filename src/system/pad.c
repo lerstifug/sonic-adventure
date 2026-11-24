@@ -320,6 +320,22 @@ static void pad_read_sticks(void)
         }
         if (x > PAD_DEAD_ZONE || x < -PAD_DEAD_ZONE || y > PAD_DEAD_ZONE ||
             y < -PAD_DEAD_ZONE) {
+#ifdef NONMATCHING
+            /* repairs an axis that reads 0, which the test below takes for
+             * positive, so the dead zone left it at -PAD_DEAD_ZONE, a lean to
+             * the left or up. an analog stick seldom reads 0, but a key or a
+             * d-pad pushes the other axis to exactly 0 */
+            if (x > 0.0F) {
+                x -= PAD_DEAD_ZONE;
+            } else if (x < 0.0F) {
+                x += PAD_DEAD_ZONE;
+            }
+            if (y > 0.0F) {
+                y -= PAD_DEAD_ZONE;
+            } else if (y < 0.0F) {
+                y += PAD_DEAD_ZONE;
+            }
+#else
             if (x >= 0.0F) {
                 x -= PAD_DEAD_ZONE;
             } else {
@@ -330,6 +346,7 @@ static void pad_read_sticks(void)
             } else {
                 y += PAD_DEAD_ZONE;
             }
+#endif
             if (camera_work != NULL) {
                 ang = (Angle)(STICK_ATAN2F(y, x) * ANGLE_PER_RADIAN) -
                       camera_work->ang.y;
