@@ -868,28 +868,34 @@ def write(path, program):
     # integer and float arguments of x86-64's System V calls in order,
     # whichever a function takes, as each class has registers of its own
     # there. a register widens as a pointer, whose low half a number keeps,
-    # and the float result is read where those calls leave it. Windows
-    # passes each argument by its place, not its class, so there the call
-    # loads R4 to R7 into the four integer registers and FR4 to FR7 into the
-    # four float ones together (native_win64_call, engine/native/shim.c):
-    # right for a function whose arguments are all of one class, or none,
-    # and wrong for one that mixes the two, which no JSR's site tells apart.
-    # Every other processor passes them another way, so there such a JSR
-    # ends the run
+    # and the float result is read where those calls leave it. the PSP's
+    # calls, MIPS's EABI with a single-precision FPU, give each class
+    # registers of its own too. Windows passes each argument by its place,
+    # not its class, so there the call loads R4 to R7 into the four integer
+    # registers and FR4 to FR7 into the four float ones together
+    # (native_win64_call, engine/native/shim.c): right for a function whose
+    # arguments are all of one class, or none, and wrong for one that mixes
+    # the two, which no JSR's site tells apart. Every other processor passes
+    # them another way, so there such a JSR ends the run
     out += ['#if defined(__x86_64__) && defined(_WIN64)',
             '    float out_;',
             '    uint64_t ints_[4] = {widened(R[4]), widened(R[5]), widened(R[6]), widened(R[7])};',
             '    float floats_[4] = {F.f[4], F.f[5], F.f[6], F.f[7]};',
             '    uintptr_t r_ = native_win64_call((void *)widened(target), ints_, floats_, &out_);',
             '    F.f[0] = out_;', '    R[0] = (uint32_t)r_;',
-            '#elif defined(__x86_64__) && !defined(_WIN32)',
+            '#elif (defined(__x86_64__) && !defined(_WIN32)) || defined(__PSP__)',
             '    uintptr_t r_ = ((uintptr_t (*)(uintptr_t, uintptr_t, uintptr_t, uintptr_t, float, float, float, float))'
             'widened(target))(widened(R[4]), widened(R[5]), widened(R[6]), widened(R[7]), F.f[4], F.f[5], F.f[6], '
             'F.f[7]);',
-            '    __asm__ volatile("movss %%xmm0, %0" : "=m"(F.f[0]));', '    R[0] = (uint32_t)r_;',
+            '#ifdef __PSP__',
+            '    __asm__ volatile("swc1 $f0, %0" : "=m"(F.f[0]));',
+            '#else',
+            '    __asm__ volatile("movss %%xmm0, %0" : "=m"(F.f[0]));',
+            '#endif',
+            '    R[0] = (uint32_t)r_;',
             '#else',
             '    fprintf(stderr, "sa1: a JSR reached %#x, the game\'s C, which asm2c.py\'s C calls by x86-64\'s '
-            'System V convention alone: run it on such a host, or lift the function the JSR calls\\n", '
+            'System V convention and the PSP\'s alone: run it on such a host, or lift the function the JSR calls\\n", '
             '(unsigned)target);',
             '    abort();',
             '#endif', '}', '']
