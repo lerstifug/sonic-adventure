@@ -252,7 +252,16 @@ PS2_LIBRARIES := $(addprefix $(PS2_LIBC)/,libc.a libm.a libcglue.a libkernel.a l
 # play.c opens the engine, as on the PSP. The drawer's calls are the
 # engine's rows, which the C++ defines out of stubs.py's sight, as the
 # PSP's does
-PS2_MAIN_OBJ := $(PS2_REST_OBJ) $(PS2_CXX_OBJ) $(PS2)/obj/engine/sa1/play.o $(PS2_VU_OBJ)
+# audsrv's IOP module, the sound's (engine/ps2/window.cpp), as the
+# program's own bytes, which it loads from memory
+PS2_IRX_OBJ := $(PS2)/obj/irx/audsrv_irx.o
+$(PS2)/obj/irx/audsrv_irx.c: $(PS2_SDK)/iop/irx/audsrv.irx
+	@$(call status,irx,$<)
+	$(Q)mkdir -p $(@D)
+	$(Q)$(PS2_SDK)/bin/bin2c $< $@ audsrv_irx
+$(PS2_IRX_OBJ): %.o: %.c
+	$(Q)$(PS2_CC) -c -o $@ $<
+PS2_MAIN_OBJ := $(PS2_REST_OBJ) $(PS2_CXX_OBJ) $(PS2)/obj/engine/sa1/play.o $(PS2_VU_OBJ) $(PS2_IRX_OBJ)
 PS2_STUBBED := $(PS2_REST_OBJ)
 -include $(PS2)/obj/engine/sa1/play.d
 $(PS2)/stubs.c: $(PS2_STUBBED) $(NATIVE_PROGRAMS:%=$(PS2)/program-%.o) engine/tools/stubs.py \
@@ -275,7 +284,7 @@ PS2_WRAPS := pad_scan frame_wait njDrawTriangle3D njDrawPolygon2D njDrawLine3D n
 PS2_LINK = $(PS2_CXX) -T$(PS2_SDK)/ee/startup/linkfile -L$(PS2_SDK)/ee/lib -Wl,-zmax-page-size=128 \
 	-Wl,--defsym,__executable_start=_ftext \
 	$(PS2_WRAPS:%=-Wl$(comma)--wrap=%) $$(awk '{ printf " -Wl,--defsym,%s=%s", $$1, $$2 }' $(PS2)/aliases.txt) \
-	$(PS2_MAIN_OBJ) $(PS2)/stubs.o -L$(GSKIT)/lib -lgskit -ldmakit -lpad -lstdc++ -latomic -lm
+	$(PS2_MAIN_OBJ) $(PS2)/stubs.o -L$(GSKIT)/lib -lgskit -ldmakit -lpad -laudsrv -lpatches -lstdc++ -latomic -lm
 $(PS2)/main.elf: $(PS2_MAIN_OBJ) $(PS2)/stubs.o $(NATIVE_PROGRAMS:%=$(PS2)/program-%.o) $(PS2_LINK_TOOLS) \
 		$(PS2_MEMORY) $(PS2_NEEDS) $(PS2)/link.txt
 	@$(call status,link,$@)
