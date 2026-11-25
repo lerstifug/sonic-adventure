@@ -168,6 +168,20 @@ struct ps2_vu_shade {
     int corner_offsets;
 };
 float *ps2_vu_open(const struct psp_state *state, const struct ps2_vu_shade *shade);
+/* a batch of count corners as ps2_vu_open's room holds them, from the
+ * caller's own memory, 16-byte aligned, which VIF1 reads by DMA as the
+ * picture's commands go: they stay as they lie till ps2_vu_release gives
+ * them up */
+void ps2_vu_batch(const struct psp_state *state, const struct ps2_vu_shade *shade, const float *corners,
+                  uint32_t count);
+/* corners ps2_vu_batch sent: the raster frees them, from malloc, once no
+ * command it sent reads them */
+void ps2_vu_release(void *corners);
+/* as ps2_vu_batch, for a batch that blends: it waits for the picture's sort
+ * of the blends at depth, the depth of its middle. 0 where the raster can't
+ * keep it, which the caller draws as before */
+int ps2_vu_batch_later(float depth, const struct psp_state *state, const struct ps2_vu_shade *shade,
+                       const float *corners, uint32_t count);
 void ps2_vu_close(uint32_t count);
 /* the palette a batch lights by: 256 entries, each a color and an offset,
  * ARGB, the colors' every second word from colors and the offsets' from

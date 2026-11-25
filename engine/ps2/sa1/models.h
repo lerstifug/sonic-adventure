@@ -20,6 +20,13 @@
  *    blends goes as the walk's do, on the EE, to the picture's sort of the
  *    blends, and a model under Ninja's own drawers goes by the walk
  *
+ * 4. the cache: an opaque meshset's batches are made once, its corners as
+ *    VU1 takes them in memory of their own, which VIF1 reads by DMA each
+ *    picture (gs.cpp's ps2_vu_batch): the EE writes a batch's head alone.
+ *    a meshset's points, normals and u and v are checked by a hash each
+ *    draw, as the game moves some in place (shape motions, scrolled u and
+ *    v), and the cache goes at each load
+ *
  * a corner's word (model.vsm): 2 where it starts a strip, so it draws
  * nothing, else the cull's turn for the triangle it ends */
 #define MODELS_START 2.0F
@@ -28,6 +35,10 @@
  * the points their balls took, the strips whose boxes were found, the
  * corners gathered for VU1, and those lit on the EE */
 uint32_t ps2_models_drawn, ps2_models_points, ps2_models_boxes, ps2_models_corners, ps2_models_ee;
+/* and the meshsets whose batches the cache made */
+uint32_t ps2_models_built, ps2_models_cached_corners, ps2_models_volatile, ps2_models_new_uv;
+/* the meshsets that blend: by env map, by offset, and the rest */
+uint32_t ps2_models_blend_why[4];
 
 /* shade adds argb whole and takes none of the palette's */
 static void models_flat(struct ps2_vu_shade *shade, uint32_t argb)
@@ -282,6 +293,322 @@ static inline float models_word(uint32_t k, int cull, int reversed)
     return k < 2 ? MODELS_START : !cull ? 0.0F : ((k - 2) & 1) != (uint32_t)(reversed != 0) ? -1.0F : 1.0F;
 }
 
+/* the cache of opaque meshsets' batches: each batch's corners, its count,
+ * its ball in the model's space, and the strips it holds of its meshset's,
+ * first to last */
+struct models_cached {
+    float *corners;
+    uint32_t count;
+    float center[3], radius;
+    uint32_t first, last;
+    /* each corner's place among the meshset's u and v, and the copy its u
+     * and v go to when they alone change, which takes the corners' place:
+     * the copy last sent two pictures before, which no command reads now */
+    uint32_t *uv_at;
+    float *spare;
+};
+/* a meshset's batches, and what they were made of: its own address and
+ * arrays', its model's points and normals by their hash, its u and v by
+ * theirs, and its cull */
+struct models_kept {
+    const NJS_MESHSET *set;
+    const void *points, *normals, *uv, *meshes;
+    uint32_t shape, uv_hash, corners;
+    int cull;
+    struct models_cached *batches;
+    uint32_t count;
+    /* the times it was made again for what changed; past MODELS_CHANGES it
+     * changes each picture, as a welded character's points do, and goes by
+     * the strips' path */
+    uint32_t changes;
+};
+#define MODELS_CHANGES 2
+/* the slots a meshset's address may take, from its hash on */
+#define MODELS_PROBE 4
+/* libc.h has no memalign: ps2sdk's newlib does */
+void *memalign(size_t align, size_t size);
+#define MODELS_KEPT 8192
+/* the cache's most bytes of corners: past them a meshset goes as before */
+#define MODELS_KEPT_BYTES (2U << 20)
+#define MODELS_TAKE 4096
+static struct models_kept models_kept_at[MODELS_KEPT];
+static uint32_t models_kept_bytes;
+
+/* a meshset's batches go; its slot stays its own where keep says */
+static void models_empty(struct models_kept *k)
+{
+    for (uint32_t b = 0; b < k->count; b++) {
+        /* the raster frees them once no command it sent reads them */
+        ps2_vu_release(k->batches[b].corners);
+        ps2_vu_release(k->batches[b].spare);
+        free(k->batches[b].uv_at);
+        models_kept_bytes -= k->batches[b].count * (k->batches[b].spare ? 96 : 48);
+    }
+    free(k->batches);
+    k->batches = NULL;
+    k->count = 0;
+}
+
+static void models_drop(struct models_kept *k)
+{
+    models_empty(k);
+    memset(k, 0, sizeof *k);
+}
+
+/* the cache goes at each of the game's loads, its meshsets with it */
+static void models_forget(void)
+{
+    for (uint32_t i = 0; i < MODELS_KEPT; i++) {
+        if (models_kept_at[i].set) {
+            models_drop(&models_kept_at[i]);
+        }
+    }
+}
+
+static inline uint32_t models_mix(uint32_t h, uint32_t word)
+{
+    return (h ^ word) * 16777619U;
+}
+
+/* a meshset's corners, and the hash of its u and v over them */
+static uint32_t models_uv_hash(const NJS_MESHSET *set, uint32_t corners)
+{
+    uint32_t h = 2166136261U;
+    const uint32_t *words = (const uint32_t *)set->vertuv;
+
+    for (uint32_t i = 0; words && i < corners; i++) {
+        h = models_mix(h, words[i]);
+    }
+    return h;
+}
+
+/* a batch made of the corners in room, kept: its corners in memory of their
+ * own, aligned for DMA, and its ball. 0 where memory is short */
+static int models_keep_batch(struct models_kept *k, const float *room, const uint32_t *room_uv, uint32_t used,
+                             uint32_t first, uint32_t last)
+{
+    struct models_cached *more, *b;
+    float lo[3], hi[3], far = 0.0F;
+
+    if (used < 3 || models_kept_bytes + used * 48 > MODELS_KEPT_BYTES) {
+        return used < 3;
+    }
+    if (!(more = realloc(k->batches, (k->count + 1) * sizeof *more))) {
+        return 0;
+    }
+    k->batches = more;
+    b = &k->batches[k->count];
+    if (!(b->corners = memalign(64, used * 48))) {
+        return 0;
+    }
+    memcpy(b->corners, room, used * 48);
+    if (!(b->uv_at = malloc(used * sizeof *b->uv_at))) {
+        free(b->corners);
+        return 0;
+    }
+    memcpy(b->uv_at, room_uv, used * sizeof *b->uv_at);
+    b->spare = NULL;
+    b->count = used;
+    b->first = first;
+    b->last = last;
+    for (int j = 0; j < 3; j++) {
+        lo[j] = hi[j] = room[j];
+    }
+    for (uint32_t i = 1; i < used; i++) {
+        for (int j = 0; j < 3; j++) {
+            lo[j] = room[12 * i + j] < lo[j] ? room[12 * i + j] : lo[j];
+            hi[j] = room[12 * i + j] > hi[j] ? room[12 * i + j] : hi[j];
+        }
+    }
+    for (int j = 0; j < 3; j++) {
+        b->center[j] = (lo[j] + hi[j]) * 0.5F;
+    }
+    for (uint32_t i = 0; i < used; i++) {
+        float dx = room[12 * i] - b->center[0], dy = room[12 * i + 1] - b->center[1],
+              dz = room[12 * i + 2] - b->center[2];
+        float d = dx * dx + dy * dy + dz * dz;
+
+        far = d > far ? d : far;
+    }
+    b->radius = sqrtf(far);
+    k->count++;
+    models_kept_bytes += used * 48;
+    return 1;
+}
+
+/* a meshset's batches, made as the strips' path would make them for a
+ * model within every side, each of whole strips but where a strip runs past
+ * a batch's room, and the next goes on from its last two corners */
+static int models_build(struct models_kept *k, const NJS_MESHSET *set, const struct models_set *w, int cull)
+{
+    static float room[PS2_VU_CORNERS * 12];
+    static uint32_t room_uv[PS2_VU_CORNERS];
+    const Sint16 *at = set->meshes;
+    uint32_t used = 0, corner = 0, first = 0;
+
+    for (uint32_t p = 0; p < set->nbMesh; p++) {
+        uint32_t n;
+        int reversed;
+
+        walk_polygon(set, &at, &n, &reversed);
+        if (n >= 3) {
+            if (used + 3 > PS2_VU_CORNERS) {
+                if (!models_keep_batch(k, room, room_uv, used, first, p - 1)) {
+                    return 0;
+                }
+                used = 0;
+            }
+            if (used == 0) {
+                first = p;
+            }
+            for (uint32_t c = 0; c < n; c++) {
+                if (c >= 2 && used == PS2_VU_CORNERS) {
+                    if (!models_keep_batch(k, room, room_uv, used, first, p)) {
+                        return 0;
+                    }
+                    used = 0;
+                    first = p;
+                    for (uint32_t j = c - 2; j < c; j++) {
+                        room_uv[used] = corner + j;
+                        models_corner(room + 12 * used++, w, (uint16_t)at[j], corner + j, MODELS_START);
+                    }
+                }
+                room_uv[used] = corner + c;
+                models_corner(room + 12 * used++, w, (uint16_t)at[c], corner + c, models_word(c, cull, reversed));
+            }
+        }
+        at += n;
+        corner += n;
+    }
+    k->corners = corner;
+    return used == 0 || models_keep_batch(k, room, room_uv, used, first, set->nbMesh - 1);
+}
+
+/* a meshset's u and v changed, and nothing else: each batch's spare copy
+ * takes them, and the corners' place. 0 where memory is short */
+static int models_new_uv(struct models_kept *k, const NJS_MESHSET *set)
+{
+    for (uint32_t b = 0; b < k->count; b++) {
+        struct models_cached *cb = &k->batches[b];
+        float *out;
+
+        if (!cb->spare) {
+            if (models_kept_bytes + cb->count * 48 > MODELS_KEPT_BYTES || !(cb->spare = memalign(64, cb->count * 48))) {
+                return 0;
+            }
+            memcpy(cb->spare, cb->corners, cb->count * 48);
+            models_kept_bytes += cb->count * 48;
+        }
+        out = cb->spare;
+        for (uint32_t i = 0; i < cb->count; i++) {
+            out[12 * i + 8] = (float)set->vertuv[cb->uv_at[i]].tex.u;
+            out[12 * i + 9] = (float)set->vertuv[cb->uv_at[i]].tex.v;
+        }
+        cb->spare = cb->corners;
+        cb->corners = out;
+    }
+    return 1;
+}
+
+/* a meshset's batches from the cache, made again where what they were made
+ * of changed, or null where the cache doesn't take it */
+static const struct models_kept *models_kept_for(const NJS_MODEL *model, const NJS_MESHSET *set, uint32_t shape,
+                                                 int cull, const struct models_set *w)
+{
+    uint32_t slot = ((uint32_t)(uintptr_t)set >> 2) * 2654435761U >> 19 & (MODELS_KEPT - 1);
+    struct models_kept *k = NULL, *free_slot = NULL;
+
+    /* its slot among the few from its hash on, or a free one, or the
+     * first's */
+    for (uint32_t i = 0; i < MODELS_PROBE; i++) {
+        struct models_kept *at = &models_kept_at[(slot + i) & (MODELS_KEPT - 1)];
+
+        if (at->set == set) {
+            k = at;
+            break;
+        }
+        if (!at->set && !free_slot) {
+            free_slot = at;
+        }
+    }
+    if (k) {
+        if (k->changes > MODELS_CHANGES) {
+            ps2_models_volatile++;
+            return NULL;
+        }
+        if (k->points == model->points && k->normals == model->normals && k->uv == set->vertuv &&
+            k->meshes == set->meshes && k->shape == shape && k->cull == cull) {
+            uint32_t uv_hash = models_uv_hash(set, k->corners);
+
+            if (k->uv_hash == uv_hash) {
+                return k->count ? k : NULL;
+            }
+            /* the u and v alone moved, as a scrolled texture's do */
+            if (k->count && models_new_uv(k, set)) {
+                k->uv_hash = uv_hash;
+                ps2_models_new_uv++;
+                return k;
+            }
+        }
+        /* what it was made of changed: made again, unless it changes so
+         * often that it goes by the strips' path from now on */
+        models_empty(k);
+        if (++k->changes > MODELS_CHANGES) {
+            return NULL;
+        }
+    } else {
+        k = free_slot ? free_slot : &models_kept_at[slot];
+        if (k->set) {
+            models_drop(k);
+        }
+        k->set = set;
+    }
+    k->points = model->points;
+    k->normals = model->normals;
+    k->uv = set->vertuv;
+    k->meshes = set->meshes;
+    k->shape = shape;
+    k->cull = cull;
+    if (!models_build(k, set, w, cull)) {
+        models_empty(k);
+        k->changes = MODELS_CHANGES + 1;
+        return NULL;
+    }
+    k->uv_hash = models_uv_hash(set, k->corners);
+    ps2_models_built++;
+    return k;
+}
+
+/* where a ball of the model's space lies against the raster's reach, as
+ * models_box's sides: 0 within every side, 1 past one whole, 2 across */
+static int models_ball(const float *m, const float *center, float radius, float reach)
+{
+    float vx = center[0] * m[0] + center[1] * m[4] + center[2] * m[8] + m[12];
+    float vy = center[0] * m[1] + center[1] * m[5] + center[2] * m[9] + m[13];
+    float vz = center[0] * m[2] + center[1] * m[6] + center[2] * m[10] + m[14];
+    float fx = sa1_screen.scale_x, fy = sa1_screen.scale_y;
+    float ox = sa1_screen.cx - 320.0F, oy = sa1_screen.cy - 240.0F;
+    /* each side's plane through the eye, as a and b over x or y and z */
+    float planes[4][3] = {{-fx, reach * 320.0F - ox, vx}, {fx, reach * 320.0F + ox, vx},
+                          {-fy, reach * 240.0F - oy, vy}, {fy, reach * 240.0F + oy, vy}};
+    int across = 0;
+
+    if (vz + radius < 1.0F) {
+        return 1;
+    }
+    across = vz - radius < 1.0F;
+    for (int i = 0; i < 4; i++) {
+        float a = planes[i][0], b = planes[i][1];
+        float d = (a * planes[i][2] + b * vz) / sqrtf(a * a + b * b);
+
+        if (d < -radius) {
+            return 1;
+        }
+        across |= d < radius;
+    }
+    return across ? 2 : 0;
+}
+
 /* draw model under state, 1, or leave it out, 0 */
 static int models_draw(const NJS_MODEL *model, uint8_t mode, const struct draw_state *state)
 {
@@ -289,6 +616,8 @@ static int models_draw(const NJS_MODEL *model, uint8_t mode, const struct draw_s
     static uint8_t cuts[WALK_MATERIALS];
     static struct psp_corner strip[WALK_STRIP];
     static uint8_t sides[WALK_STRIP];
+    static uint8_t take[MODELS_TAKE];
+    int all, offset_counts;
     const float *m = native_xmtrx();
     float reach = psp_draw_reach();
     const NJS_POINT3 *points = model->points;
@@ -300,9 +629,9 @@ static int models_draw(const NJS_MODEL *model, uint8_t mode, const struct draw_s
     const NJS_POINT3 *c = &model->center;
     double seen[3] = {sa1_live_light.x, sa1_live_light.y, sa1_live_light.z};
     const uint32_t *colors = NULL, *offsets = NULL;
-    uint32_t constant;
+    uint32_t constant, shape = 2166136261U;
     float light[3];
-    int cutting, white = 0;
+    int cutting, white = 0, no_offsets = 1, no_unlit = 1;
 
     /* Ninja's own drawers light by their own ways, which the walk has */
     if (mode != SA_SHADE_PALETTE) {
@@ -340,8 +669,15 @@ static int models_draw(const NJS_MODEL *model, uint8_t mode, const struct draw_s
     for (uint32_t i = 0; i < count_points; i++) {
         float dx = points[i].x - c->x, dy = points[i].y - c->y, dz = points[i].z - c->z;
         float apart = dx * dx + dy * dy + dz * dz;
+        const uint32_t *bits = (const uint32_t *)&points[i];
 
         far = apart > far ? apart : far;
+        shape = models_mix(models_mix(models_mix(shape, bits[0]), bits[1]), bits[2]);
+        if (model->normals) {
+            const uint32_t *nbits = (const uint32_t *)&model->normals[i];
+
+            shape = models_mix(models_mix(models_mix(shape, nbits[0]), nbits[1]), nbits[2]);
+        }
     }
     for (int j = 0; j < 3; j++) {
         eye[j] = c->x * m[j] + c->y * m[4 + j] + c->z * m[8 + j] + m[12 + j];
@@ -358,6 +694,25 @@ static int models_draw(const NJS_MODEL *model, uint8_t mode, const struct draw_s
         colors = sa1_live_colors + state->palette * SA_PALETTE_ENTRIES * 2;
         offsets = pal < SA_CAP_PALETTES_COUNT ? sa1_live_colors + pal * SA_CAP_PALETTE_ENTRIES * 2 + 1 : NULL;
         ps2_vu_palette(state->palette | spec << 8, colors, offsets);
+    }
+    /* whether the draw's offsets are all 0: the palette's, and the unlit
+     * words of the model's points. a meshset that adds them goes from the
+     * cache only then, where they change nothing */
+    if (offsets) {
+        uint32_t lit = 0;
+
+        for (uint32_t e = 0; e < SA_PALETTE_ENTRIES; e++) {
+            lit |= offsets[e * 2] & 0x00ffffffU;
+        }
+        no_offsets = lit == 0;
+    }
+    {
+        uint32_t lit = 0;
+
+        for (uint32_t i = 0; i < count_points && i < SA_CAP_UNLIT_OFFSETS; i++) {
+            lit |= sa1_live_colors[SA_CAP_PALETTES_COUNT * SA_CAP_PALETTE_ENTRIES * 2 + i] & 0x00ffffffU;
+        }
+        no_unlit = lit == 0;
     }
     constant = argb(1.0, state->material.r, state->material.g, state->material.b);
     view_id(1);
@@ -435,13 +790,82 @@ static int models_draw(const NJS_MODEL *model, uint8_t mode, const struct draw_s
                 w.shade.add[3] = blended ? (float)alpha : 0.0F;
             }
         }
+        /* an opaque meshset goes from the cache: a batch within every side
+         * as it is, one past a side whole not at all, and one across a side
+         * by the strips' path below, its strips' and its neighbours' that
+         * share one, so no strip goes twice */
+        all = 1;
+        /* the offset counts only where the material adds it and it isn't
+         * 0: then the unlit words, which change, stay out of the cache, as
+         * does a blend's offset over its texture, which takes the EE's
+         * second pass */
+        offset_counts = drawn.offset && (w.unlit_offsets ? !no_unlit
+                                                         : drawn.blend && drawn.texture && !drawn.decal && !no_offsets);
+        if (drawn.blend) {
+            ps2_models_blend_why[w.env ? 0 : offset_counts ? 1 : 3]++;
+        }
+        if (!offset_counts && !w.env && set->nbMesh <= MODELS_TAKE) {
+            const struct models_kept *k = models_kept_for(model, set, shape, cull, &w);
+
+            if (k && k->count <= 1024) {
+                static int8_t side[1024];
+                int any = 0;
+                float scale = sqrtf(longest);
+
+                all = 0;
+                memset(take, 0, set->nbMesh);
+                for (uint32_t b = 0; b < k->count && b < 1024; b++) {
+                    side[b] = (int8_t)(cutting ? models_ball(m, k->batches[b].center, k->batches[b].radius * scale,
+                                                             reach)
+                                               : 0);
+                }
+                for (int pass = 0; pass < 2; pass++) {
+                    for (uint32_t i = 0; i < k->count && i < 1024; i++) {
+                        uint32_t b = pass == 0 ? i : k->count - 1 - i;
+                        const struct models_cached *cb = &k->batches[b];
+
+                        if (side[b] == 0 && (take[cb->first] || take[cb->last])) {
+                            side[b] = 2;
+                        }
+                        if (side[b] == 2) {
+                            memset(take + cb->first, 1, cb->last - cb->first + 1);
+                            any = 1;
+                        }
+                    }
+                }
+                for (uint32_t b = 0; b < k->count && b < 1024; b++) {
+                    const struct models_cached *cb = &k->batches[b];
+
+                    if (side[b] != 0) {
+                        continue;
+                    }
+                    ps2_models_cached_corners += cb->count;
+                    if (!drawn.blend) {
+                        ps2_vu_batch(&drawn, &w.shade, cb->corners, cb->count);
+                        continue;
+                    }
+                    /* a batch that blends waits for the picture's sort, by
+                     * the depth of its ball's middle; the batch turns as its
+                     * corners' words say */
+                    drawn.cull = 0;
+                    if (!ps2_vu_batch_later(cb->center[0] * m[2] + cb->center[1] * m[6] + cb->center[2] * m[10] + m[14],
+                                            &drawn, &w.shade, cb->corners, cb->count)) {
+                        memset(take + cb->first, 1, cb->last - cb->first + 1);
+                        any = 1;
+                    }
+                }
+                if (!any) {
+                    continue;
+                }
+            }
+        }
         for (uint32_t p = 0; p < set->nbMesh; p++) {
             uint32_t n;
             int reversed;
             int box = 0;
 
             walk_polygon(set, &at, &n, &reversed);
-            if (n < 3) {
+            if (n < 3 || (!all && !take[p])) {
                 at += n;
                 corner += n;
                 continue;

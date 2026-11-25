@@ -144,6 +144,45 @@ memory every frame by DMA.
    lower would give back the vertical resolution, but needs a picture a
    field, 60 a second.
 
+## Toward 60 fps
+
+The aim is a picture in 16.7 ms on the EE (`fps 60`, `sa1_fast_on`). At the
+start of Emerald Coast it took 72 ms; it now takes about 47 ms. The steps so
+far:
+
+- **Blended strips on VU1.** A blended strip within every side joins the
+  blends' sort whole, by its own depth, and VU1 draws it there. Only strips
+  across a side go through the EE triangle by triangle.
+- **Crossing strips split by triangle.** A strip across a side sends only
+  its crossing triangles to the EE, and the rest join the VU1 batch.
+- **The meshset cache** (`models.h`). Each meshset's VU1 corners are built
+  once, in batches of whole strips with a bounding ball each:
+  - **Sending:** `ps2_vu_batch` writes a batch's head, and VIF1 reads the
+    corners straight from the cache by a DMA REF. A deferred record carries
+    the REF as an external chunk.
+  - **Culling:** a batch within every side goes as it is, one past a side
+    is skipped, and one across a side goes by the strips' path.
+  - **Blended meshsets:** each batch waits in the blends' sort, by the depth
+    of its middle (`ps2_vu_batch_later`).
+  - **Checks:** a hash of the model's points and normals, and of the
+    meshset's UVs, is checked every draw. A UV change alone (a scrolled
+    texture) rewrites the UVs into a spare copy, the two copies alternating.
+    A meshset whose points change in more than two draws (welded
+    characters, the sea's waves) goes by the strips' path from then on.
+  - **Lifetime:** the cache is dropped at each load, and a buffer is freed
+    once no stream reads it (`ps2_vu_release`).
+- **Smaller savings:**
+  - the deferred sort sorts indices, not records
+  - the fog table is rebuilt only when the fog registers change
+  - a disc folder is listed once, not at every open, which cut the stage
+    load from 5.8 s to 1.0 s
+
+What remains, roughly: the strips' path for changing meshsets (about 3,600
+corners a picture, gathered and partly lit on the EE), the EE's triangle
+path (about 185 cut triangles, plus the scene's own batches and the 2D),
+and the game's own logic. `PS2_DEBUG := -g` in `ps2.mk` gives the profile
+source lines.
+
 ## What carries over
 
 - **The VU1 model path** (`models.h`, `model.vsm`): geometry, culling, and

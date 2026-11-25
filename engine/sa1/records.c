@@ -702,6 +702,8 @@ static void walk_released(const NJS_TEXLIST *list);
 /* a load's textures are made between these (engine/ps2/textures.cpp) */
 void ps2_textures_begin(void);
 void ps2_textures_end(void);
+/* the model path's cache goes at a load (engine/ps2/sa1/models.h) */
+static void models_forget(void);
 #endif
 
 /* name is the texture's, or null for the name its list holds. a texture the
@@ -766,6 +768,7 @@ void sa1_textures_loaded(const void *texlist, uint32_t count,
     /* the PS2 makes each texture now, at the game's own load, so no draw
      * reads the disc: from the TIM2 of the load's file, read once for the
      * whole list (engine/ps2/textures.cpp) */
+    models_forget();
     ps2_textures_begin();
     for (uint32_t i = 0; i < count && i < list->nbTexture; i++) {
         (void)walk_texture(list, i);
