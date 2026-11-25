@@ -124,7 +124,7 @@ constexpr float NEAR_Z = 1.0F;
  * corner within the GS's coordinates, from -2048 to 2047 past the frame's
  * middle */
 constexpr float REACH = 5.0F;
-constexpr float DEPTH_MOST = 65535.0F;
+constexpr float DEPTH_MOST = 16777215.0F; /* the 24-bit depth buffer's most */
 /* the qwords of each of VIF1's two streams, a picture's commands: a
  * picture that fills one sends it and goes on in the other */
 constexpr uint32_t STREAM_QWORDS = 3U << 15;
@@ -294,7 +294,7 @@ struct Held {
      * gives it at the picture's end, after its draws */
     uint32_t clear = 0xff000000U;
     /* the last registers sent, so a draw sends only what it changes */
-    uint64_t tex0 = 0, tex1 = 0, clamp = 0, alpha = 0, test = 0, zbuf = 0;
+    uint64_t tex0 = 0, tex1 = 0, clamp = 0, alpha = 0, test = 0, zbuf = 0, dthe = 0;
     bool sent = false;
     std::vector<Corner> cut_in, cut_out;
     std::vector<Sent> sent_corners;
@@ -313,9 +313,6 @@ struct Held {
     /* the texture last bound this picture: another bind of it sends
      * nothing, so it binds once until another binds */
     const Texture *bound = nullptr;
-    /* the screen buffer the open picture draws into, 0 or 1: the other
-     * shows, or shows from the next blank (flip_at_blank) */
-    uint32_t draw_buffer = 0;
     /* VIF1's two streams, as DMA chains: the one the EE writes, its words
      * written, its open CNT tag's word and its open DIRECT's, -1 where
      * none. a DIRECT after VU1's work waits for it by a FLUSH */
@@ -356,7 +353,11 @@ struct Held {
      * microseconds the EE took making them and waited on the GS */
     uint32_t timed = 0, triangles = 0;
     uint64_t make_us = 0, gs_us = 0, strip_us = 0, bind_us = 0;
+    /* the screen buffer the open picture draws into, 0 or 1: the other
+     * shows, or shows from the next blank (flip_at_blank) */
+    uint32_t draw_buffer = 0;
     uint32_t sends = 0; /* the textures a bind sent */
+    uint64_t sent_bytes = 0; /* and their texels' and CLUTs' bytes */
     uint32_t vu_batches = 0, vu_triangles = 0; /* VU1's batches and their triangles */
     uint32_t strips_past = 0; /* strips wholly past a side, dropped */
     uint32_t reported = 0; /* the clock at the last report */
@@ -412,7 +413,8 @@ volatile uint32_t *const D1_QWC = reinterpret_cast<volatile uint32_t *>(0x100090
 volatile uint32_t *const D1_TADR = reinterpret_cast<volatile uint32_t *>(0x10009030);
 constexpr uint32_t CHCR_STR = 0x100;
 
-/* the buffer the display shows from the next blank, or -1: flip_at_blank */
+/* the buffer the display shows from the next blank after the GS draws it,
+ * or -1: flip_at_blank */
 volatile int32_t flip_pending = -1;
 
 uint32_t vif_code(uint32_t command, uint32_t num, uint32_t immediate)
@@ -581,6 +583,8 @@ void send_stream(Held &r, bool last)
     t[1] = t[2] = t[3] = 0;
     r.at += 4;
     r.most_queue = std::max(r.most_queue, r.at * 4);
+    /* the last picture shows from the buffer this stream would draw
+     * into, till the blank after the GS has drawn it */
     while (flip_pending >= 0) {
     }
     vif_wait();
@@ -859,6 +863,7 @@ bool place(Held &r, Texture *t)
     }
     r.uploads.push_back(t);
     r.sends++;
+    r.sent_bytes += t->gs.Width * t->gs.Height * texel_bits(t->gs.PSM) / 8 + t->clut_colors * 4;
     /* the GS reads the new texels after a TEXFLUSH, which the next TEX0
      * sends */
     r.tex0 = 0;
@@ -872,7 +877,7 @@ void apply(Held &r, const Draw &d)
 {
     uint64_t values[8], names[8];
     int count = 0;
-    uint64_t tex0 = r.tex0, tex1, clamp, alpha, test, zbuf;
+    uint64_t tex0 = r.tex0, tex1, clamp, alpha, test, zbuf, dthe;
 
     if (d.texture != nullptr) {
         Texture *t = const_cast<Texture *>(d.texture);
@@ -900,7 +905,22 @@ void apply(Held &r, const Draw &d)
     tex1 = GS_SETREG_TEX1(0, 0, d.linear ? 1 : 0, d.linear ? 1 : 0, 0, 0, 0);
     clamp = GS_SETREG_CLAMP(d.clamp_u ? 1 : 0, d.clamp_v ? 1 : 0, 0, 0, 0, 0);
     alpha = blend_of(d.src, d.dst);
-    test = GS_SETREG_TEST(d.cut ? 1 : 0, 6, 0x40, 0, 0, 0, 1, depth_test(d.depth));
+    /* a blend by the source's alpha over what lies behind rewrites every
+     * pixel the triangle covers, on a 16-bit screen at a cost: the GS's
+     * blend rounds down, so a texel of the faintest alpha still darkens a
+     * pixel by one of the screen's steps, and the effect's clear texels
+     * show as a dark square. a texel too faint to brighten one step (of 128,
+     * under FAINT) isn't written: alpha 0's never were seen */
+    constexpr uint32_t FAINT = 4;
+    bool faint = d.blend && !d.cut && d.src == SA_BLEND_SRC_ALPHA &&
+                 (d.dst == SA_BLEND_ONE || d.dst == SA_BLEND_INV_SRC_ALPHA);
+
+    test = d.cut     ? GS_SETREG_TEST(1, 6, 0x40, 0, 0, 0, 1, depth_test(d.depth))
+           : faint ? GS_SETREG_TEST(1, 5, FAINT, 0, 0, 0, 1, depth_test(d.depth))
+                   : GS_SETREG_TEST(0, 6, 0x40, 0, 0, 0, 1, depth_test(d.depth));
+    /* the dither stays off: the GS dithers only for a 16-bit screen, and
+     * the screen is 32-bit (show_buffer) */
+    dthe = 0;
     zbuf = GS_SETREG_ZBUF(r.gs->ZBuffer / 8192, r.gs->PSMZ, d.depth_write && !d.blend ? 0 : 1);
     if (d.texture != nullptr && (!r.sent || tex0 != r.tex0)) {
         values[count] = 0;
@@ -928,6 +948,11 @@ void apply(Held &r, const Draw &d)
     if (!r.sent || zbuf != r.zbuf) {
         values[count] = zbuf;
         names[count++] = GS_ZBUF_1;
+    }
+    if (!r.sent || dthe != r.dthe) {
+        values[count] = dthe;
+        names[count++] = GS_DTHE;
+        r.dthe = dthe;
     }
     send_registers(r, values, names, count);
     r.tex0 = tex0;
@@ -1398,14 +1423,17 @@ void fill(Held &r, uint32_t argb, uint32_t z, uint64_t ztst, bool zwrite)
     p[7] = z;
 }
 
-/* 480i's flicker filter. a line of an interlaced picture shows in one
- * field of two, so a thin line or an edge flickers at 30 Hz. the GS's
- * second read circuit shows the picture just shown again, a line lower,
- * and the merge circuit shows each pixel half the one and half the other:
- * each field's line takes half of the line below it, the other field's.
- * gsKit drives the first circuit's twin, read circuit 2, at each flip, from
- * the buffer it showed before the flip's toggle, so the filter follows it
- * there after each */
+/* the screen (engine/ps2/RENDERER.md): two buffers of 32 bits, drawn into in
+ * turn and shown in turn, and depth at 24 bits, as the GS pairs depth with
+ * color by the size of a pixel. a picture's blends keep 8 bits a channel,
+ * and the display shows the buffer as it lies: no dither.
+ *
+ * the display's read circuit 2 shows a buffer. 480i's flicker filter: a
+ * line of an interlaced picture shows in one field of two, so a thin line
+ * or an edge flickers at 30 Hz. the GS's read circuit 1 shows the same
+ * buffer a line lower, and the merge circuit shows each pixel half the one
+ * and half the other: each field's line takes half of the line below it,
+ * the other field's */
 void show_buffer(GSGLOBAL *gs, uint32_t buffer)
 {
     uint32_t at = gs->ScreenBuffer[buffer & 1];
@@ -1422,21 +1450,20 @@ void show_buffer(GSGLOBAL *gs, uint32_t buffer)
 
 /* the flip, at the vertical blank, by its interrupt: a picture's commands
  * go to the GS at the picture's end, and the buffer they draw shows at the
- * next blank, while the EE goes on to the next picture. it draws into the
- * other buffer, which no command reaches before that picture's end. that
- * picture's end waits for the flip only where it comes before the blank,
- * so the EE waits for the display only when it draws faster than it shows.
- * the GS's display circuits show from the blank, so no picture tears */
+ * first blank after the GS has drawn them (its FINISH), while the EE goes
+ * on to the next picture. that one draws into the other buffer, which its
+ * commands reach only after the flip, so the EE waits for the display only
+ * when it draws faster than it shows, and no picture tears. the handler sets
+ * the display's registers and nothing else: it starts no DMA */
 GSGLOBAL *flip_gs;
 
 int flip_at_blank(int)
 {
-    /* the GS's FINISH says it drew the picture's last command */
     if (flip_pending >= 0 && flip_gs != nullptr && (*GS_CSR & 2) != 0) {
         show_buffer(flip_gs, static_cast<uint32_t>(flip_pending));
         flip_pending = -1;
     }
-    ExitHandler();
+    /* no ExitHandler, as engine/ps2/profile.c's sample says */
     return 0;
 }
 
@@ -1505,15 +1532,13 @@ void open_screen(Held &r)
     gs->Field = ps2_interlaced ? GS_FIELD : GS_FRAME;
     gs->Width = SCREEN_W;
     gs->Height = screen_height();
-    gs->PSM = GS_PSM_CT16S;
-    gs->PSMZ = GS_PSMZ_16S;
+    /* gsKit's two screen buffers at 32 bits, and depth at 24 (show_buffer) */
+    gs->PSM = GS_PSM_CT32;
+    gs->PSMZ = GS_PSMZ_24;
     gs->ZBuffering = GS_SETTING_ON;
     gs->DoubleBuffering = GS_SETTING_ON;
     gs->PrimAlphaEnable = GS_SETTING_ON;
-    /* the screen holds 5 bits of each of the three: the dither spreads the
-     * rest over a 4 by 4 pattern, which a CRT blurs and a sharp display
-     * shows. off, a gradient bands instead */
-    gs->Dithering = ps2_dither ? GS_SETTING_ON : GS_SETTING_OFF;
+    gs->Dithering = GS_SETTING_OFF;
     gsKit_init_screen(gs);
     gsKit_mode_switch(gs, GS_ONESHOT);
     gsKit_queue_exec(gs);
@@ -1535,9 +1560,12 @@ void open_screen(Held &r)
     if (r.opened) {
         open_vu(r);
     }
-    fprintf(stderr, "sa1: the GS's screen is %dx%d, %s, %u bytes of its memory free for textures\n", SCREEN_W,
-            screen_height(), ps2_interlaced ? (ps2_deflicker ? "480i, its flicker filtered" : "480i") : "480p",
-            4U * 1024 * 1024 - gs->CurrentPointer);
+    fprintf(stderr,
+            "sa1: the GS's screen is %dx%d, %s, two buffers at 32 bits at %u and %u, the depth at 24 at %u; "
+            "%u bytes of its memory free for textures\n",
+            SCREEN_W, screen_height(), ps2_interlaced ? (ps2_deflicker ? "480i, its flicker filtered" : "480i") : "480p",
+            static_cast<unsigned>(gs->ScreenBuffer[0]), static_cast<unsigned>(gs->ScreenBuffer[1]),
+            static_cast<unsigned>(gs->ZBuffer), 4U * 1024 * 1024 - gs->CurrentPointer);
 }
 
 /* the PowerVR's register at address, as Ninja's setters wrote it */
@@ -1615,7 +1643,8 @@ void open_picture(Held &r)
         /* the alpha bits of a 16-bit texel, clear and solid, and the fog's
          * color, the PowerVR's ARGB as the GS's RGB */
         uint32_t c = r.fog.color;
-        /* and the buffer the picture draws into, the one not showing */
+        /* and the draw buffer, as the frame: the copy to the display set
+         * it so too */
         uint64_t values[3] = {static_cast<uint64_t>(0x80) << 32,
                               static_cast<uint64_t>(c >> 16 & 0xff) | (c >> 8 & 0xff) << 8 | (c & 0xff) << 16,
                               GS_SETREG_FRAME(r.gs->ScreenBuffer[r.draw_buffer & 1] / 8192, r.gs->Width / 64,
@@ -2379,8 +2408,9 @@ bool psp_submit(const PictureUniform &picture, uint32_t clear, const std::vector
     }
     uint32_t made = sceKernelGetSystemTimeLow();
 
-    /* the last picture's flip first: its buffer is the one this picture's
-     * commands draw into while it shows, until the blank */
+    /* the last picture's copy to the display first, at the blank: it reads
+     * the draw buffer this picture's commands draw into. the blank after
+     * this picture's FINISH copies it */
     send_stream(r, true);
     flip_pending = static_cast<int32_t>(r.draw_buffer);
     r.draw_buffer ^= 1;
@@ -2410,12 +2440,12 @@ bool psp_submit(const PictureUniform &picture, uint32_t clear, const std::vector
         r.reported = shown;
         fprintf(stderr,
                 "sa1: the GS's last %u pictures: %u triangles, %u us on the EE, %u of them the raster's "
-                "strips, %u its binds, which sent %u textures, %u the walk's textures and %u its points' "
+                "strips, %u its binds, which sent %u textures of %u KB, %u the walk's textures and %u its points' "
                 "light, and %u us on the GS each; %u of VU1's batches, %u triangles, %u strips dropped whole, "
                 "%u palettes sent; %u bytes of the heap in use, %u of them textures; %u pictures taken back\n",
                 static_cast<unsigned>(r.timed), static_cast<unsigned>(r.triangles / r.timed),
                 static_cast<unsigned>(r.make_us / r.timed), static_cast<unsigned>(r.strip_us / r.timed),
-                static_cast<unsigned>(r.bind_us / r.timed), static_cast<unsigned>(r.sends / r.timed),
+                static_cast<unsigned>(r.bind_us / r.timed), static_cast<unsigned>(r.sends / r.timed), static_cast<unsigned>(r.sent_bytes / r.timed / 1024),
                 static_cast<unsigned>(ps2_walk_load_us / r.timed), static_cast<unsigned>(ps2_walk_light_us / r.timed),
                 static_cast<unsigned>(r.gs_us / r.timed), static_cast<unsigned>(r.vu_batches / r.timed),
                 static_cast<unsigned>(r.vu_triangles / r.timed), static_cast<unsigned>(r.strips_past / r.timed),
@@ -2425,6 +2455,7 @@ bool psp_submit(const PictureUniform &picture, uint32_t clear, const std::vector
         ps2_walk_load_us = ps2_walk_light_us = 0;
         r.bind_us = 0;
         r.sends = 0;
+        r.sent_bytes = 0;
         r.vu_batches = r.vu_triangles = r.strips_past = r.palettes_sent = 0;
         r.timed = r.triangles = 0;
         r.make_us = r.gs_us = r.strip_us = 0;
