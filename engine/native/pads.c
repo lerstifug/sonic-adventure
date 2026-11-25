@@ -61,6 +61,92 @@ static void next_keys(void)
 
 void (*native_pad_read)(void *pad);
 
+/* a tape of the pad: the live pad's each change, written as it comes, and a
+ * tape read back in the live pad's place, at the vsync each change came
+ * at. a line holds the vsync in decimal, the buttons held, Shinobi's
+ * PDD_DGT bits in hex, then the sticks' x1 y1 x2 y2 and the triggers' r l.
+ * the game counts vsyncs, not time, so a tape plays the run it was taken
+ * from again, on any host */
+static FILE *taping, *tape;
+
+void native_pads_record(const char *path)
+{
+    if (!(taping = fopen(path, "w"))) {
+        fprintf(stderr, "sa1: can't write the pad's tape %s\n", path);
+        return;
+    }
+    setvbuf(taping, NULL, _IOLBF, 0);
+}
+
+void native_pads_replay(const char *path)
+{
+    if (!(tape = fopen(path, "r"))) {
+        fprintf(stderr, "sa1: no tape of the pad at %s\n", path);
+        exit(2);
+    }
+    native_scripted = 1;
+}
+
+/* the live pad's change since the last line, to the tape */
+static void tape_write(void)
+{
+    static struct native_pad last;
+    static int written;
+    const struct native_pad *p = pad_record;
+
+    if (written && p->on == last.on && p->x1 == last.x1 && p->y1 == last.y1 && p->x2 == last.x2 &&
+        p->y2 == last.y2 && p->r == last.r && p->l == last.l) {
+        return;
+    }
+    fprintf(taping, "%lu %x %d %d %d %d %u %u\n", native_vsyncs, (unsigned)p->on, p->x1, p->y1, p->x2, p->y2,
+            (unsigned)p->r, (unsigned)p->l);
+    last = *p;
+    written = 1;
+}
+
+/* the tape's pad at this vsync into the record */
+static void tape_read(void)
+{
+    static unsigned long at;
+    static int ahead;
+    static unsigned on, next_on, r, l, next_r, next_l;
+    static int x1, y1, x2, y2, nx1, ny1, nx2, ny2;
+    uint32_t last = pad_record->on;
+    char line[128];
+
+    while (tape) {
+        if (!ahead) {
+            if (!fgets(line, sizeof line, tape) ||
+                sscanf(line, "%lu %x %d %d %d %d %u %u", &at, &next_on, &nx1, &ny1, &nx2, &ny2, &next_r,
+                       &next_l) < 2) {
+                fclose(tape);
+                tape = NULL;
+                break;
+            }
+            ahead = 1;
+        }
+        if (native_vsyncs < at) {
+            break;
+        }
+        on = next_on;
+        x1 = nx1, y1 = ny1, x2 = nx2, y2 = ny2;
+        r = next_r, l = next_l;
+        nx1 = ny1 = nx2 = ny2 = 0;
+        next_r = next_l = 0;
+        ahead = 0;
+    }
+    pad_record->on = on;
+    pad_record->off = ~on;
+    pad_record->press = on & ~last;
+    pad_record->release = last & ~on;
+    pad_record->x1 = (int16_t)x1;
+    pad_record->y1 = (int16_t)y1;
+    pad_record->x2 = (int16_t)x2;
+    pad_record->y2 = (int16_t)y2;
+    pad_record->r = (uint16_t)r;
+    pad_record->l = (uint16_t)l;
+}
+
 /* the live pad's record is read once for each vsync, as the Dreamcast's
  * library does. its press then lasts the one vsync, however many times or
  * few the game scans in it. read at each scan, a press stayed in the record
@@ -68,15 +154,23 @@ void (*native_pad_read)(void *pad);
  * it scans, saw the press that closed its pause menu again, and paused */
 void native_pads_vsync(void)
 {
+    if (tape && pad_record) {
+        tape_read();
+        sa1_chord(pad_record);
+        return;
+    }
     if (native_pad_read && pad_record) {
         native_pad_read(pad_record);
         sa1_chord(pad_record);
+        if (taping) {
+            tape_write();
+        }
     }
 }
 
 void __wrap_pad_scan(void)
 {
-    if (native_pad_read && pad_record) {
+    if ((native_pad_read || tape) && pad_record) {
         /* the record holds the vsync's read */
     } else if (pad_record && !native_hook_pads()) {
         next_keys();

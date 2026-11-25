@@ -18,9 +18,9 @@
 PS2DEV ?= $(HOME)/ps2dev
 PS2_OPT ?= -O2
 # PS2_MATH, from the environment, is play math's build (engine/mk/play_math.mk).
-# fpu, the default, takes FMAC, FIPR, FTRV and FSRRA by the EE's own FPU, as
-# the PSP's does, where fast.c's integers take some hundred instructions
-# each and the game makes thousands a picture. the EE's FPU always rounds
+# fpu, the default, takes FIPR and FTRV by the EE's own FPU, as the PSP's
+# does, where fast.c's integers take some hundred instructions each and the
+# game makes thousands a picture (FMAC and FSRRA stay exact: see fpu.c). the EE's FPU always rounds
 # toward zero and flushes a denormal to zero, the mode the game holds the
 # SH-4's in. it has no infinity or NaN and saturates where IEEE overflows,
 # so a sum the console's would overflow differs. fast gives every host's

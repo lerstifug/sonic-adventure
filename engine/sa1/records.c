@@ -2998,6 +2998,23 @@ static void player_report(void)
     }
 }
 
+/* where the first player stands now, with the vsync, for a runner's trace
+ * of a run's path (engine/ps2/main.c) */
+void sa1_player_trace(void)
+{
+    enum { PLACE = 8 + 12 + 12 };
+    struct task *player_get_task(Uint8 player) __attribute__((weak));
+    const struct task *task = player_get_task ? player_get_task(0) : NULL;
+
+    if (task && task->work) {
+        float at[3];
+
+        memcpy(at, (const char *)task->work + PLACE, sizeof at);
+        fprintf(stderr, "sa1: at vsync %lu the player stands at %d %d %d\n", native_vsyncs, (int)at[0], (int)at[1],
+                (int)at[2]);
+    }
+}
+
 void sa1_names_report(void)
 {
     static const struct {

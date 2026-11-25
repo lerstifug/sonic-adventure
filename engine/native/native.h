@@ -263,6 +263,10 @@ void native_pad_record(void *pad);
 void native_pads_vsync(void);
 void native_keys_open(const char *path);
 extern int native_scripted;
+/* write the live pad's each change to a tape at path, or play a tape at
+ * path in the live pad's place, at the vsyncs it was taken at (pads.c) */
+void native_pads_record(const char *path);
+void native_pads_replay(const char *path);
 /* read the program's own symbols, once. it returns 0 once they are read.
  * else it returns -1 for a file it can't read, and 1 for one with no symbol
  * table. native_symbol gives an object's address by its name, or null.

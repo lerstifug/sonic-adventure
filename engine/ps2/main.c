@@ -14,7 +14,8 @@
  * act as the opening ends, vsyncs N ends the run after that many, with its
  * report, quit N quits the stage after that many vsyncs as the pause menu
  * does, keys FILE plays FILE's script of keys in the pad's place
- * (engine/native/pads.c), trace 1 has the log name each file the game
+ * (engine/native/pads.c), record FILE tapes the live pad's each change, and
+ * replay FILE plays such a tape back, trace 1 has the log name each file the game
  * opens and each program it loads, video 480p or 480i sets the screen's
  * mode, 480p by default, deflicker 0 turns 480i's flicker filter off,
  * fields 1 draws 480i a field's 224 lines at a time, and
@@ -58,6 +59,7 @@ static char game_stacks[GAME_STACK_SIZE + NATIVE_THREADS_BYTES]
     __attribute__((aligned(64)));
 
 void stage_end(short end);
+void sa1_player_trace(void);
 void syBtExit(void) __attribute__((noreturn));
 /* the screen's mode, which engine/ps2/gs.cpp opens: 480p by default, or
  * 480i, whose flicker filter is on unless the settings turn it off */
@@ -179,6 +181,10 @@ void native_vsync(void)
     if (native_trace && native_vsyncs % 120 == 0) {
         fprintf(stderr, "sa1: alive at vsync %lu\n", native_vsyncs);
     }
+    /* the player's path, twice a second, where the trace asks */
+    if (native_trace && native_vsyncs % 30 == 0) {
+        sa1_player_trace();
+    }
     /* the pause menu's quit, stage.h's STAGE_END_QUIT */
     if (quit_vsync && native_vsyncs == quit_vsync) {
         stage_end(6);
@@ -220,6 +226,16 @@ static int take_target(const char *name, const char *value)
     }
     if (!strcmp(name, "keys")) {
         native_keys_open(value);
+        return 1;
+    }
+    /* record FILE tapes the live pad, and replay FILE plays a tape in its
+     * place (engine/native/pads.c) */
+    if (!strcmp(name, "record")) {
+        native_pads_record(value);
+        return 1;
+    }
+    if (!strcmp(name, "replay")) {
+        native_pads_replay(value);
         return 1;
     }
     if (!strcmp(name, "trace")) {

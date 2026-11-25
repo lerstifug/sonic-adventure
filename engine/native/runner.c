@@ -3,7 +3,9 @@
  * to. DISC is the directory that holds the disc's files. given STAGE and
  * ACT, the run begins that act as the opening movie ends, else at the menus.
  * --capture FILE writes the pictures of that stage. --keys FILE plays a
- * script of keys, and --card FILE names the memory card's image.
+ * script of keys, --record FILE tapes the live pad's each change and
+ * --replay FILE plays such a tape (engine/native/pads.c), and --card FILE
+ * names the memory card's image.
  * --window ROOT draws in a window at the game's rate, ROOT holding the
  * build's images. --headless ROOT draws without one, and play.c names its
  * other options. a hook may take an option ahead of these.
@@ -460,6 +462,11 @@ int main(int argc, char **argv)
         } else if (!strcmp(argv[1], "--keys")) {
             native_keys_open(argv[2]);
             recorded = 1;
+        } else if (!strcmp(argv[1], "--replay")) {
+            native_pads_replay(argv[2]);
+            recorded = 1;
+        } else if (!strcmp(argv[1], "--record")) {
+            native_pads_record(argv[2]);
         } else if (!strcmp(argv[1], "--card")) {
             card = argv[2];
         } else if (!strcmp(argv[1], "--settings")) {
@@ -476,7 +483,7 @@ int main(int argc, char **argv)
     front = argc == 1;
     if (!front && argc != 3 && argc != 5) {
         fprintf(stderr,
-                "usage: play %s[--capture FILE] [--card FILE] [--keys FILE] "
+                "usage: play %s[--capture FILE] [--card FILE] [--keys FILE] [--replay FILE] [--record FILE] "
                 "[--settings FILE] [DISC FRAMES [STAGE ACT]]\n",
                 native_hook_usage);
         return 2;
