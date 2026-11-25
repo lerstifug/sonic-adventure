@@ -248,8 +248,19 @@ void Sound::voice_block(Voice &v, int32_t *mix, uint32_t frames)
 
 /* stream_frame, for frames frames: the stream's samples by its rate over
  * the output's, each side by the stream's gain */
+#ifdef _EE
+/* the PS2's settings' music 0 leaves the streams, music and voices, out of
+ * the mix, so the sound effects are heard alone (engine/ps2/main.c) */
+extern "C" int ps2_music;
+#endif
+
 void Sound::stream_block(Stream &s, int32_t *mix, uint32_t frames)
 {
+#ifdef _EE
+    if (!ps2_music) {
+        mix = nullptr;
+    }
+#endif
     if (s.lead >= 1) {
         uint32_t held =
             s.lead >= frames ? frames : static_cast<uint32_t>(s.lead);
@@ -277,8 +288,10 @@ void Sound::stream_block(Stream &s, int32_t *mix, uint32_t frames)
         if (mono_ && right_channel) {
             left = right = left + right;
         }
-        mix[2 * i] += (left * gain) >> GAIN_BITS;
-        mix[2 * i + 1] += (right * gain) >> GAIN_BITS;
+        if (mix != nullptr) {
+            mix[2 * i] += (left * gain) >> GAIN_BITS;
+            mix[2 * i + 1] += (right * gain) >> GAIN_BITS;
+        }
         s.part += step;
         while (s.part >= 65536) {
             s.part -= 65536;

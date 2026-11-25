@@ -17,9 +17,11 @@
 
 #include <vector>
 
-/* the notes the SPU2's voices took, which the window's log tells */
-extern "C" unsigned long ps2_spu_notes;
-unsigned long ps2_spu_notes;
+/* the notes the SPU2's voices took, which the window's log tells: all,
+ * those with a voice to the reverb, and the sum of the sending notes'
+ * sends, in hundredths */
+extern "C" unsigned long ps2_spu_notes, ps2_spu_wet, ps2_spu_sends;
+unsigned long ps2_spu_notes, ps2_spu_wet, ps2_spu_sends;
 
 namespace pc {
 
@@ -28,6 +30,10 @@ namespace {
 /* the SPU2's envelope, held full: the fastest attack, decay to the top,
  * a sustain that holds, and the fastest release, for a voice keyed off */
 constexpr uint16_t SPU_ADSR1 = 0x000f, SPU_ADSR2 = 0x1fc0;
+/* the reverb's return, a share of the program's loudest output. the
+ * SPU2's send is on or off, so a note that sends takes a second voice, to
+ * the reverb alone at its send's level (spu_note) */
+constexpr float SPU_REVERB_SHARE = 1.0F;
 /* a piece of a bank's VAG, read and sent at a time */
 constexpr uint32_t SPU_PIECE = SA1SND_CHUNK;
 uint8_t spu_piece[SPU_PIECE] __attribute__((aligned(64)));
@@ -185,8 +191,41 @@ struct sa1snd_voice &Sound::spu_change(uint32_t slot)
     return spu_frame_.changes[spu_change_[slot] - 1];
 }
 
+/* a free voice of the SPU2's, core 1's first, which mix straight to the
+ * output, or -1 */
+int Sound::spu_free()
+{
+    for (uint32_t n = 0; n < SA1SND_VOICES; n++) {
+        uint32_t slot = (n + 24) % SA1SND_VOICES;
+
+        if (spu_owner_[slot] == 0) {
+            return static_cast<int>(slot);
+        }
+    }
+    return -1;
+}
+
+/* a voice of the SPU2's keyed on in this render's frame, with its sample,
+ * the envelope held full, and dry or to the reverb alone */
+void Sound::spu_key(Voice &v, uint32_t slot, uint32_t start, bool wet)
+{
+    struct sa1snd_voice &c = spu_change(slot);
+
+    c.what |= SA1SND_SET_ENVELOPE | SA1SND_SET_START | SA1SND_SET_WET;
+    c.wet = wet;
+    c.adsr1 = SPU_ADSR1;
+    c.adsr2 = SPU_ADSR2;
+    c.start = start;
+    spu_frame_.on[slot / 24] |= 1U << (slot % 24);
+    spu_owner_[slot] = static_cast<int16_t>(&v - voices_ + 1);
+}
+
 /* a note just made: where its sample is in the SPU2's memory and a voice
- * there is free, that voice plays it, keyed on in this render's frame */
+ * there is free, that voice plays it dry, keyed on in this render's frame.
+ * the AICA sends a note to the DSP at a level of its own, and the SPU2's
+ * voice sends all or nothing, so a note that sends takes a second voice
+ * where one is free, keyed on with the first, to the reverb alone at its
+ * send's level */
 void Sound::spu_note(Voice &v)
 {
     if (!ps2::spu_ready()) {
@@ -205,25 +244,26 @@ void Sound::spu_note(Voice &v)
     if (!found) {
         return;
     }
-    /* core 1's voices first, which mix straight to the output */
-    for (uint32_t n = 0; n < SA1SND_VOICES; n++) {
-        uint32_t slot = (n + 24) % SA1SND_VOICES;
+    int slot = spu_free();
 
-        if (spu_owner_[slot] != 0) {
-            continue;
-        }
-        ps2_spu_notes++;
-        struct sa1snd_voice &c = spu_change(slot);
-
-        c.what |= SA1SND_SET_ENVELOPE | SA1SND_SET_START;
-        c.adsr1 = SPU_ADSR1;
-        c.adsr2 = SPU_ADSR2;
-        c.start = found->spu;
-        spu_frame_.on[slot / 24] |= 1U << (slot % 24);
-        spu_owner_[slot] = static_cast<int16_t>(&v - voices_ + 1);
-        v.hw = static_cast<uint8_t>(slot + 1);
-        v.sent_pitch = v.sent_left = v.sent_right = 0;
+    if (slot < 0) {
         return;
+    }
+    ps2_spu_notes++;
+    spu_key(v, static_cast<uint32_t>(slot), found->spu, false);
+    v.hw = static_cast<uint8_t>(slot + 1);
+    v.hw_wet = 0;
+    v.sent_pitch = v.sent_left = v.sent_right = v.sent_wet = 0;
+    if (v.send <= 0) {
+        return;
+    }
+    int wet = spu_free();
+
+    if (wet >= 0) {
+        ps2_spu_wet++;
+        ps2_spu_sends += static_cast<unsigned long>(v.send * 100.0F + 0.5F);
+        spu_key(v, static_cast<uint32_t>(wet), found->spu, true);
+        v.hw_wet = static_cast<uint8_t>(wet + 1);
     }
 }
 
@@ -239,6 +279,13 @@ void Sound::spu_drop(Voice &v)
     spu_frame_.on[slot / 24] &= ~(1U << (slot % 24));
     spu_owner_[slot] = 0;
     v.hw = 0;
+    if (v.hw_wet) {
+        slot = v.hw_wet - 1U;
+        spu_frame_.off[slot / 24] |= 1U << (slot % 24);
+        spu_frame_.on[slot / 24] &= ~(1U << (slot % 24));
+        spu_owner_[slot] = 0;
+        v.hw_wet = 0;
+    }
 }
 
 /* a block of a voice of the SPU2's: its volume and pitch where they moved,
@@ -258,11 +305,28 @@ void Sound::spu_block(Voice &v, float gain, float pitch, uint32_t frames)
         v.sent_left = left;
         v.sent_right = right;
     }
+    /* the reverb's voice: the send is the DSP's one input, so both its
+     * sides take it */
+    uint16_t wet = v.hw_wet ? spu_volume(gain * v.send) : 0;
+
+    if (v.hw_wet && wet != v.sent_wet) {
+        struct sa1snd_voice &c = spu_change(v.hw_wet - 1U);
+
+        c.what |= SA1SND_SET_VOLUME;
+        c.left = c.right = wet;
+        v.sent_wet = wet;
+    }
     if (p != v.sent_pitch) {
         struct sa1snd_voice &c = spu_change(slot);
 
         c.what |= SA1SND_SET_PITCH;
         c.pitch = p;
+        if (v.hw_wet) {
+            struct sa1snd_voice &w = spu_change(v.hw_wet - 1U);
+
+            w.what |= SA1SND_SET_PITCH;
+            w.pitch = p;
+        }
         v.sent_pitch = p;
     }
     uint64_t moved = static_cast<uint64_t>(static_cast<float>(v.step) * pitch * 65536.0F) * frames + v.part;
@@ -277,6 +341,55 @@ void Sound::spu_block(Voice &v, float gain, float pitch, uint32_t frames)
             v.at = v.loop_start + (v.at - v.loop_start) % (v.loop_end - v.loop_start);
         }
     }
+}
+
+/* the reverb in the DSP's place (engine/ps2/SOUND.md's stage 3): the
+ * SPU2's preset by the size of the program's ring, the room it models,
+ * 8K to 64K words, and its return's depth by the loudest of the program's
+ * outputs. no program, or outputs all silent, and no reverb. sent where
+ * either moved */
+void Sound::spu_reverb()
+{
+    /* libsd's SD_EFFECT_MODE_STUDIO_1 to 3, and _HALL */
+    static const uint32_t MODES[4] = {2, 3, 4, 5};
+    const uint8_t *fpb = memory_ + fx_programs_.address;
+    uint32_t size = fx_programs_.bytes, mode = 0;
+    const uint8_t *table = size >= 20 && spu_program_ < read32(fpb + 12)
+                               ? within(fpb, size, 0x10, spu_program_ + 1, 4)
+                               : nullptr;
+    const uint8_t *entry = table ? within(fpb, size, read32(table + 4 * spu_program_), 1, 0x28) : nullptr;
+    float most = 0;
+
+    if (!ps2::spu_ready()) {
+        return;
+    }
+    if (entry && read32(entry + 0x24) != 0) {
+        mode = MODES[entry[0x20] & 3];
+    }
+    for (uint32_t i = 0; i < FX_OUTPUTS; i++) {
+        most = fx_left_[i] > most ? fx_left_[i] : most;
+        most = fx_right_[i] > most ? fx_right_[i] : most;
+    }
+    float d = most * SPU_REVERB_SHARE * 32767.0F;
+    int32_t depth = d <= 0.0F ? 0 : d >= 32767.0F ? 32767 : static_cast<int32_t>(d);
+
+    if (depth == 0) {
+        mode = 0;
+    }
+    if (mode == spu_mode_ && depth == spu_depth_) {
+        return;
+    }
+    struct sa1snd_effect e {};
+
+    e.mode = mode;
+    e.depth = depth;
+    ps2::spu_effect(e);
+    if (mode != spu_mode_) {
+        fprintf(stderr, "sa1: the DSP's program %u is the SPU2's reverb %u, its return %d of 32767\n",
+                static_cast<unsigned>(spu_program_), static_cast<unsigned>(mode), static_cast<int>(depth));
+    }
+    spu_mode_ = mode;
+    spu_depth_ = depth;
 }
 
 /* the render's frame of changes to the IOP's module, once a render */

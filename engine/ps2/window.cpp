@@ -32,7 +32,7 @@ extern "C" void *_gp;
 extern "C" int _fio_io_sema;
 /* the notes the SPU2's voices took (engine/ps2/sound_spu.h), and whether
  * the settings ask for the trace */
-extern "C" unsigned long ps2_spu_notes;
+extern "C" unsigned long ps2_spu_notes, ps2_spu_wet, ps2_spu_sends;
 extern "C" int native_trace;
 
 namespace pc {
@@ -278,8 +278,11 @@ void play(void *arg)
             for (uint32_t i = 0; i < SA1SND_VOICES; i++) {
                 live[i / 24] += st.envelope[i] != 0;
             }
-            fprintf(stderr, "sa1: the SPU2's voices took %lu notes; %u of core 0's and %u of core 1's sound\n",
-                    ps2_spu_notes, static_cast<unsigned>(live[0]), static_cast<unsigned>(live[1]));
+            fprintf(stderr,
+                    "sa1: the SPU2's voices took %lu notes, %lu of them with a voice to the reverb, sending %lu%% "
+                    "on average; %u of core 0's and %u of core 1's sound\n",
+                    ps2_spu_notes, ps2_spu_wet, ps2_spu_wet ? ps2_spu_sends / ps2_spu_wet : 0UL,
+                    static_cast<unsigned>(live[0]), static_cast<unsigned>(live[1]));
         }
         /* the piece goes once audsrv's ring has room for it. each call to
          * the IOP is a short one, under the lock of ps2sdk's file calls,

@@ -125,4 +125,34 @@ Stage 2's first steps are in:
   voices took and how many of each core's sound.
 
 The effects play from the SPU2's voices in PCSX2. Next: a closer listen
-against the PC build (loops, envelopes, balance), then reverb (stage 3).
+against the PC build (loops, envelopes, balance).
+
+Stage 3 is in, awaiting a listen:
+- **The cores' reverb** (`sa1snd`'s effect call): each core's work area sits
+  at the top of the SPU2's memory, core 0's ending at 0x1dffff and core 1's
+  at 0x1fffff. So the banks now end at 0x1c0000; Emerald Coast's reach
+  0x186000. The voices' wet output joins each core's mix.
+- **The preset**, by the game's DSP program: its ring's size, the room it
+  models, picks Studio 1, 2 or 3, or Hall, for 8K to 64K words. The return's
+  depth is the loudest of the program's outputs, and follows the game's
+  moves of their levels. Emerald Coast sets program 0, a 32K ring: Studio 3
+  at full depth.
+- **Each note's send, by a second voice:** the SPU2's voice goes to the
+  reverb all or nothing, where the AICA sends a note at a level of its own.
+  So a note plays on one voice dry, and a note that sends takes a second,
+  keyed on with it, to the reverb alone at its send's level. The return is
+  the program's loudest output.
+  - All or nothing, the reverb was wrong either way. With every sending
+    voice wet (and the music too, then), it was too much. With only the
+    sends of a quarter or more wet, the player's, the enemies' and the
+    objects' effects stayed dry, and only the ambience (water, birds) took
+    it.
+  - In Emerald Coast every note sends, at 19% (−14 dB) on average, and
+    takes its second voice; at most 16 voices play at once, of 48.
+- **No input's reverb:** only the voices' wet output reaches the reverb.
+  `audsrv` sends its stream, core 1's sound-data input, to the reverb too,
+  so the music took it until those bits were cleared, along with core 1's
+  external input's (core 0's output).
+- **Approximations:** the AICA's DSP runs the game's own programs, and the
+  SPU2 only its presets. The game's 3D placement through the DSP (QSound)
+  stays volume and pan.

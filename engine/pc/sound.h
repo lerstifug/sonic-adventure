@@ -89,9 +89,11 @@ struct Voice {
 #endif
 #if defined(SA_SMALL) && defined(_EE)
     /* the PS2's: the SPU2's voice that plays it, 1 and up, or 0 where the
-     * mixer does, and its pitch and volumes as last sent there */
-    uint8_t hw;
-    uint16_t sent_pitch, sent_left, sent_right;
+     * mixer does, and its pitch and volumes as last sent there. hw_wet is
+     * the voice that plays it to the reverb alone, at its send's level, or
+     * 0 */
+    uint8_t hw, hw_wet;
+    uint16_t sent_pitch, sent_left, sent_right, sent_wet;
 #endif
     Real step; /* samples a frame */
     int base, fine; /* the split's own note and its cents */
@@ -296,11 +298,18 @@ private:
     uint32_t spu_converted_ = 0, spu_bytes_ = 0, spu_us_ = 0;
     void spu_bank(uint32_t address, uint32_t bytes, bool programs);
     void spu_forget(uint32_t from, uint32_t to);
+    int spu_free();
+    void spu_key(Voice &voice, uint32_t slot, uint32_t start, bool wet);
     void spu_note(Voice &voice);
     void spu_drop(Voice &voice);
     void spu_block(Voice &voice, float gain, float pitch, uint32_t frames);
     struct sa1snd_voice &spu_change(uint32_t slot);
     void spu_send();
+    /* the reverb in the DSP's place: the program last set, and the mode
+     * and depth last sent */
+    uint32_t spu_program_ = ~0U, spu_mode_ = 0;
+    int32_t spu_depth_ = -1;
+    void spu_reverb();
 #endif
 
     uint8_t *memory_ = nullptr;

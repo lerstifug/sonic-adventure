@@ -19,6 +19,8 @@ void spu_upload(uint32_t address, const void *bytes, uint32_t count);
 bool spu_ready();
 /* a frame of the voices' changes and keys */
 void spu_frame(const struct sa1snd_frame &frame);
+/* the cores' reverb, or its depth alone where its mode stands */
+void spu_effect(const struct sa1snd_effect &effect);
 /* the voices' envelopes and ends, as they stand */
 bool spu_status(struct sa1snd_status &status);
 

@@ -14,6 +14,10 @@ IRX_ID("sa1snd", 1, 1);
 static uint8_t buffer[sizeof(struct sa1snd_upload)] __attribute__((aligned(64)));
 static SifRpcDataQueue_t queue;
 static SifRpcServerData_t server;
+/* each core's voices that go to its reverb alone, and its mode. the rest
+ * go to its dry output alone */
+static uint32_t wet[2];
+static uint32_t effect_mode;
 
 /* a voice's entry in libsd's words: its core, and its number in it */
 static uint16_t voice_of(uint32_t voice)
@@ -33,7 +37,7 @@ static void upload(const struct sa1snd_upload *u)
 static void frame(const struct sa1snd_frame *f)
 {
     uint32_t count = f->count < SA1SND_CHANGES ? f->count : SA1SND_CHANGES;
-    int core;
+    int core, wet_moved = 0;
 
     /* the voices keyed off first, so one keyed again in the same frame
      * starts afresh */
@@ -64,12 +68,63 @@ static void frame(const struct sa1snd_frame *f)
         if (c->what & SA1SND_SET_START) {
             sceSdSetAddr((u16)(v | SD_VADDR_SSA), c->start);
         }
+        if (c->what & SA1SND_SET_WET) {
+            uint32_t bit = 1U << (c->voice % 24);
+
+            wet_moved |= 1 << (c->voice / 24);
+            wet[c->voice / 24] = c->wet ? wet[c->voice / 24] | bit : wet[c->voice / 24] & ~bit;
+        }
+    }
+    for (core = 0; core < 2; core++) {
+        if (wet_moved & (1 << core)) {
+            sceSdSetSwitch((u16)(core | SD_SWITCH_VMIXL), ~wet[core] & 0xffffff);
+            sceSdSetSwitch((u16)(core | SD_SWITCH_VMIXR), ~wet[core] & 0xffffff);
+            sceSdSetSwitch((u16)(core | SD_SWITCH_VMIXEL), wet[core]);
+            sceSdSetSwitch((u16)(core | SD_SWITCH_VMIXER), wet[core]);
+        }
     }
     for (core = 0; core < 2; core++) {
         if (f->on[core] != 0) {
             sceSdSetSwitch((u16)(core | SD_SWITCH_KON), f->on[core]);
         }
     }
+}
+
+/* each core's reverb, its work area at the top of the SPU2's memory, its
+ * return mixed with the core's voices' dry output. a mode as it stands
+ * moves the depth alone, as the effect's return volume */
+static void effect(const struct sa1snd_effect *e)
+{
+    int core;
+
+    for (core = 0; core < 2; core++) {
+        if (e->mode == effect_mode) {
+            sceSdSetParam((u16)(core | SD_PARAM_EVOLL), (u16)e->depth);
+            sceSdSetParam((u16)(core | SD_PARAM_EVOLR), (u16)e->depth);
+            continue;
+        }
+        sceSdEffectAttr attr;
+
+        attr.core = core;
+        attr.mode = (int)e->mode | (e->mode ? SD_EFFECT_MODE_CLEAR : 0);
+        attr.depth_L = (short)e->depth;
+        attr.depth_R = (short)e->depth;
+        attr.delay = e->delay;
+        attr.feedback = e->feedback;
+        sceSdSetCoreAttr((u16)(core | SD_CORE_EFFECT_ENABLE), 0);
+        if (e->mode != 0) {
+            sceSdSetAddr((u16)(core | SD_ADDR_EEA), core ? SA1SND_EFFECT_END1 : SA1SND_EFFECT_END0);
+            sceSdSetEffectAttr(core, &attr);
+            sceSdSetCoreAttr((u16)(core | SD_CORE_EFFECT_ENABLE), 1);
+            /* the voices' wet output, MSNDEL and MSNDER (9, 8), and no
+             * input's: audsrv's stream comes in as core 1's sound data
+             * (SINEL, SINER: 1, 0) and core 0's output as its external
+             * input (MINEL, MINER: 5, 4), and the music is no voice's */
+            sceSdSetParam((u16)(core | SD_PARAM_MMIX),
+                          (u16)((sceSdGetParam((u16)(core | SD_PARAM_MMIX)) | 0x300) & ~0x33));
+        }
+    }
+    effect_mode = e->mode;
 }
 
 static void status(struct sa1snd_status *s)
@@ -96,6 +151,9 @@ static void *serve(int call, void *data, int bytes)
         break;
     case SA1SND_STATUS:
         status((struct sa1snd_status *)data);
+        break;
+    case SA1SND_EFFECT:
+        effect((const struct sa1snd_effect *)data);
         break;
     default:
         break;

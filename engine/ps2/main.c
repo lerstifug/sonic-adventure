@@ -86,6 +86,9 @@ int ps2_textures_pak = 0;
 /* sort 0 draws each opaque draw as it comes, where by default a picture's
  * wait to go sorted by palette and texture (engine/ps2/RENDERER.md) */
 int ps2_sort = 1;
+/* music 0 leaves the streams, music and voices, out of the sound, so the
+ * sound effects are heard alone (engine/pc/mixer.h) */
+int ps2_music = 1;
 /* the sampling profiler's (engine/ps2/profile.c) */
 static int sampling;
 void ps2_profile_start(void);
@@ -278,6 +281,10 @@ static int take_target(const char *name, const char *value)
     }
     if (!strcmp(name, "sort")) {
         ps2_sort = atoi(value);
+        return 1;
+    }
+    if (!strcmp(name, "music")) {
+        ps2_music = atoi(value);
         return 1;
     }
     /* sample 1: the sampling profiler (profile.c) */

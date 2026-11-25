@@ -19,4 +19,6 @@ I_sceSdSetSwitch
 I_sceSdGetSwitch
 I_sceSdVoiceTrans
 I_sceSdVoiceTransStatus
+I_sceSdSetCoreAttr
+I_sceSdSetEffectAttr
 libsd_IMPORTS_end

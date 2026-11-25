@@ -640,11 +640,18 @@ void Sound::drain()
             case SA_AUDIO_FX_PROGRAM:
                 fx_program(static_cast<uint32_t>(c.sound),
                            static_cast<uint32_t>(c.value));
+#if defined(SA_SMALL) && defined(_EE)
+                spu_program_ = static_cast<uint32_t>(c.sound);
+                spu_reverb();
+#endif
                 break;
             case SA_AUDIO_FX_OUTPUT:
                 if (id < FX_OUTPUTS) {
                     fx_[id].level_moved = c.value;
                     fx_output_gains(id);
+#if defined(SA_SMALL) && defined(_EE)
+                    spu_reverb();
+#endif
                 }
                 break;
             case SA_AUDIO_QSOUND:

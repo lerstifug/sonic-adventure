@@ -113,6 +113,17 @@ void spu_frame(const struct sa1snd_frame &frame)
     call(SA1SND_FRAME, &frame_buffer, bytes, nullptr, 0);
 }
 
+void spu_effect(const struct sa1snd_effect &effect)
+{
+    static struct sa1snd_effect buffer __attribute__((aligned(64)));
+
+    if (!bound) {
+        return;
+    }
+    buffer = effect;
+    call(SA1SND_EFFECT, &buffer, sizeof buffer, nullptr, 0);
+}
+
 bool spu_status(struct sa1snd_status &status)
 {
     if (!bound) {
