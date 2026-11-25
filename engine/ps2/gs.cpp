@@ -428,6 +428,12 @@ struct Held {
     /* the strips the walk's cut sent VU1, the triangles it cut on the EE,
      * and the triangles the blends' sort took */
     uint32_t cut_vu = 0, cut_ee = 0, blend_triangles = 0, blend_strips = 0, batches_cached = 0, blend_batches = 0;
+    /* the triangles the EE's own path took, by where they came from: the
+     * walk's cut, its kept strips, the scene's batches in the world, and
+     * those on the screen */
+    enum { FROM_CUT, FROM_KEPT, FROM_SCENE, FROM_SCREEN, FROMS };
+    uint32_t from = FROM_SCENE;
+    uint32_t ee_from[FROMS] = {};
     /* MIPTBP1 and MIPTBP2 as last sent */
     uint64_t miptbp1 = 0, miptbp2 = 0;
     /* the last draw begun waits in the list, for its offset pass to follow */
@@ -1643,6 +1649,8 @@ void send_draw(Held &r, const Draw &d, const Screen &s, const Corner *corners, u
     std::vector<Sent> &pool = r.sent_corners;
     std::vector<uint32_t> &masks = r.masks, &kept = r.kept_index;
 
+    r.ee_from[r.from] += indices / 3;
+
     pool.resize(count);
     masks.resize(count);
     kept.clear();
@@ -2683,7 +2691,9 @@ void draw_later(Held &r)
         if (vu_blend(r, l)) {
             continue;
         }
+        r.from = Held::FROM_KEPT;
         send_corners(r, r.places[l.place], l.state, r.kept + l.first, l.count, l.triangles);
+        r.from = Held::FROM_SCENE;
     }
     r.later.clear();
     r.kept_used = 0;
@@ -2994,7 +3004,9 @@ bool psp_submit(const PictureUniform &picture, uint32_t clear, const std::vector
             color_of(f.base, f.offset, d, c);
             in.push_back(c);
         }
+        r.from = screen ? Held::FROM_SCREEN : Held::FROM_SCENE;
         send_triangles(r, d, s, in.data(), static_cast<uint32_t>(in.size()), screen);
+        r.from = Held::FROM_SCENE;
     }
     if (!blends_drawn) {
         draw_blends(r);
@@ -3041,7 +3053,7 @@ bool psp_submit(const PictureUniform &picture, uint32_t clear, const std::vector
                 "sa1: the GS's last %u pictures: %u triangles, %u us on the EE, %u of them the raster's "
                 "strips, %u its binds, which sent %u textures of %u KB, %u the walk's textures and %u its points' "
                 "light, and %u us on the GS each; %u of VU1's batches, %u triangles, %u strips dropped whole, "
-                "%u palettes sent; the models' path: %u models, %u points, %u boxes, %u corners to VU1, %u on the EE, %u batches cached of %u corners, %u meshsets made, %u changing, %u of new u and v, blends by env %u, offset %u, else %u; %u strips cut by VU1, %u triangles cut on the EE, %u blends, %u of them strips by VU1 and %u models' batches; %u textures bound, %u sent before the blends; at most %u draws sorted in %u KB, %u lists sent early, %u wraps of the ring; %u bytes "
+                "%u palettes sent; the models' path: %u models, %u points, %u boxes, %u corners to VU1, %u on the EE, %u batches cached of %u corners, %u meshsets made, %u changing, %u of new u and v, blends by env %u, offset %u, else %u; %u strips cut by VU1, %u triangles cut on the EE, %u blends, %u of them strips by VU1 and %u models' batches; the EE's triangles from the cut %u, kept strips %u, the scene %u, the screen %u; %u textures bound, %u sent before the blends; at most %u draws sorted in %u KB, %u lists sent early, %u wraps of the ring; %u bytes "
                 "of the heap in use, %u of them textures; %u pictures taken back\n",
                 static_cast<unsigned>(r.timed), static_cast<unsigned>(r.triangles / r.timed),
                 static_cast<unsigned>(r.make_us / r.timed), static_cast<unsigned>(r.strip_us / r.timed),
@@ -3060,6 +3072,8 @@ bool psp_submit(const PictureUniform &picture, uint32_t clear, const std::vector
                 static_cast<unsigned>(r.cut_vu / r.timed),
                 static_cast<unsigned>(r.cut_ee / r.timed), static_cast<unsigned>(r.blend_triangles / r.timed),
                 static_cast<unsigned>(r.blend_strips / r.timed), static_cast<unsigned>(r.blend_batches / r.timed),
+                static_cast<unsigned>(r.ee_from[0] / r.timed), static_cast<unsigned>(r.ee_from[1] / r.timed),
+                static_cast<unsigned>(r.ee_from[2] / r.timed), static_cast<unsigned>(r.ee_from[3] / r.timed),
                 static_cast<unsigned>(r.distinct / r.timed),
                 static_cast<unsigned>(r.opaque_sends / r.timed), static_cast<unsigned>(r.deferred_most),
                 static_cast<unsigned>(r.staging_most / 1024),
@@ -3074,6 +3088,7 @@ bool psp_submit(const PictureUniform &picture, uint32_t clear, const std::vector
         r.vu_batches = r.vu_triangles = r.strips_past = r.palettes_sent = 0;
         r.deferred_most = r.flushed_early = r.ring_wraps = r.distinct = r.opaque_sends = r.staging_most = 0;
         r.cut_vu = r.cut_ee = r.blend_triangles = r.blend_strips = r.batches_cached = r.blend_batches = 0;
+        memset(r.ee_from, 0, sizeof r.ee_from);
         ps2_models_drawn = ps2_models_points = ps2_models_boxes = ps2_models_corners = ps2_models_ee = 0;
         ps2_models_built = ps2_models_cached_corners = ps2_models_volatile = ps2_models_new_uv = 0;
         memset(ps2_models_blend_why, 0, sizeof ps2_models_blend_why);
@@ -3305,7 +3320,9 @@ extern "C" void psp_draw_cut(const struct psp_corner *corners, uint32_t count, i
 
     if (later == nullptr) {
         r.cut_ee += made / 3;
+        r.from = pc::Held::FROM_CUT;
         pc::send_corners(r, r.place, r.state, tri.data(), made, true);
+        r.from = pc::Held::FROM_SCENE;
         return;
     }
     if (r.kept_used + made > pc::KEPT_CORNERS) {

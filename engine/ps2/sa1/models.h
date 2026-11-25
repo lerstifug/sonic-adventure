@@ -365,9 +365,11 @@ static void models_forget(void)
     }
 }
 
+/* a hash's next step, a rotate and an xor: it only has to tell a change,
+ * and the EE's multiply is slow */
 static inline uint32_t models_mix(uint32_t h, uint32_t word)
 {
-    return (h ^ word) * 16777619U;
+    return (h << 5 | h >> 27) ^ word;
 }
 
 /* a meshset's corners, and the hash of its u and v over them */
@@ -697,22 +699,38 @@ static int models_draw(const NJS_MODEL *model, uint8_t mode, const struct draw_s
     }
     /* whether the draw's offsets are all 0: the palette's, and the unlit
      * words of the model's points. a meshset that adds them goes from the
-     * cache only then, where they change nothing */
-    if (offsets) {
-        uint32_t lit = 0;
-
-        for (uint32_t e = 0; e < SA_PALETTE_ENTRIES; e++) {
-            lit |= offsets[e * 2] & 0x00ffffffU;
-        }
-        no_offsets = lit == 0;
-    }
+     * cache only then, where they change nothing. each is found once a
+     * vsync, as the palettes change between pictures, not within one */
     {
-        uint32_t lit = 0;
+        static unsigned long found_at = (unsigned long)-1;
+        static int8_t palette_zero[SA_CAP_PALETTES_COUNT];
+        static uint32_t first_unlit;
 
-        for (uint32_t i = 0; i < count_points && i < SA_CAP_UNLIT_OFFSETS; i++) {
-            lit |= sa1_live_colors[SA_CAP_PALETTES_COUNT * SA_CAP_PALETTE_ENTRIES * 2 + i] & 0x00ffffffU;
+        if (found_at != native_vsyncs) {
+            found_at = native_vsyncs;
+            memset(palette_zero, -1, sizeof palette_zero);
+            first_unlit = SA_CAP_UNLIT_OFFSETS;
+            for (uint32_t i = 0; i < SA_CAP_UNLIT_OFFSETS; i++) {
+                if (sa1_live_colors[SA_CAP_PALETTES_COUNT * SA_CAP_PALETTE_ENTRIES * 2 + i] & 0x00ffffffU) {
+                    first_unlit = i;
+                    break;
+                }
+            }
         }
-        no_unlit = lit == 0;
+        if (offsets) {
+            uint32_t pal = (uint32_t)(offsets - 1 - sa1_live_colors) / (SA_CAP_PALETTE_ENTRIES * 2);
+
+            if (pal < SA_CAP_PALETTES_COUNT && palette_zero[pal] < 0) {
+                uint32_t lit = 0;
+
+                for (uint32_t e = 0; e < SA_PALETTE_ENTRIES; e++) {
+                    lit |= offsets[e * 2] & 0x00ffffffU;
+                }
+                palette_zero[pal] = lit == 0;
+            }
+            no_offsets = pal < SA_CAP_PALETTES_COUNT && palette_zero[pal] == 1;
+        }
+        no_unlit = count_points <= first_unlit;
     }
     constant = argb(1.0, state->material.r, state->material.g, state->material.b);
     view_id(1);
@@ -890,8 +908,54 @@ static int models_draw(const NJS_MODEL *model, uint8_t mode, const struct draw_s
                     drawn.cull = (uint8_t)(!cull ? 0 : box == 2 || !reversed ? 1 : 2);
                     ps2_models_ee += n;
                     if (box == 2) {
-                        models_strip(strip, &w, at, n, corner);
-                        psp_draw_cut(strip, n, reversed, &drawn, eye[2]);
+                        /* across a side, by its corners' sides, as an
+                         * opaque strip goes: a run within every side is
+                         * kept whole for VU1, a run across is cut, and a
+                         * triangle past a side goes nowhere. a run from an
+                         * odd triangle turns the strip's other way */
+                        uint32_t k = 2;
+
+                        for (uint32_t j = 0; j < n; j++) {
+                            uint32_t i = (uint16_t)at[j];
+
+                            sides[j] = (uint8_t)models_sides(m, &points[i < count_points ? i : 0], reach);
+                        }
+                        while (k < n) {
+                            uint32_t first = k - 2, end = k;
+                            int within = (sides[k - 2] | sides[k - 1] | sides[k]) == 0;
+                            int turned = (reversed != 0) != ((first & 1) != 0);
+
+                            if ((sides[k - 2] & sides[k - 1] & sides[k]) != 0) {
+                                k++;
+                                continue;
+                            }
+                            /* the run of triangles of the same kind */
+                            while (end + 1 < n) {
+                                uint32_t e = sides[end - 1] & sides[end] & sides[end + 1];
+                                uint32_t a = sides[end - 1] | sides[end] | sides[end + 1];
+
+                                if (e != 0 || (a == 0) != within) {
+                                    break;
+                                }
+                                end++;
+                            }
+                            if (within) {
+                                struct psp_corner *room = psp_draw_room(end - first + 1, 1);
+
+                                if (room) {
+                                    models_strip(room, &w, at + first, end - first + 1, corner + first);
+                                    drawn.cull = (uint8_t)(!cull ? 0 : turned ? 2 : 1);
+                                    psp_draw_later_within(models_depth(m, points, count_points, at + first,
+                                                                       end - first + 1),
+                                                          &drawn, room, end - first + 1);
+                                }
+                            } else {
+                                models_strip(strip, &w, at + first, end - first + 1, corner + first);
+                                drawn.cull = (uint8_t)(cull ? 1 : 0);
+                                psp_draw_cut(strip, end - first + 1, turned, &drawn, eye[2]);
+                            }
+                            k = end + 1;
+                        }
                     } else {
                         struct psp_corner *room = psp_draw_room(n, 1);
 

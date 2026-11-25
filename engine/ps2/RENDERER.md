@@ -147,7 +147,7 @@ memory every frame by DMA.
 ## Toward 60 fps
 
 The aim is a picture in 16.7 ms on the EE (`fps 60`, `sa1_fast_on`). At the
-start of Emerald Coast it took 72 ms; it now takes about 47 ms. The steps so
+start of Emerald Coast it took 72 ms; it now takes about 45.5 ms. The steps so
 far:
 
 - **Blended strips on VU1.** A blended strip within every side joins the
@@ -171,17 +171,35 @@ far:
     characters, the sea's waves) goes by the strips' path from then on.
   - **Lifetime:** the cache is dropped at each load, and a buffer is freed
     once no stream reads it (`ps2_vu_release`).
+- **Blended strips across a side split by triangle,** as opaque ones are: a
+  run within every side is kept for VU1, and only a run across is cut.
 - **Smaller savings:**
   - the deferred sort sorts indices, not records
+  - the palettes' and unlit words' zero checks run once a vsync, not once
+    a model
+  - the shape hash rotates and xors, as the EE's multiply is slow
   - the fog table is rebuilt only when the fog registers change
   - a disc folder is listed once, not at every open, which cut the stage
     load from 5.8 s to 1.0 s
 
-What remains, roughly: the strips' path for changing meshsets (about 3,600
-corners a picture, gathered and partly lit on the EE), the EE's triangle
-path (about 185 cut triangles, plus the scene's own batches and the 2D),
-and the game's own logic. `PS2_DEBUG := -g` in `ps2.mk` gives the profile
-source lines.
+What remains, roughly, by the report's counts and the profile:
+
+- **The EE's triangle path:** about 10% of the EE, for about 750 triangles
+  a picture:
+  - 480 from blended strips VU1 doesn't take, most likely those adding a
+    specular offset, which needs the EE's second, additive pass (a pass of
+    `strip.vsm`'s with the offset as its color would take them)
+  - 185 opaque triangles across the near plane
+  - 79 on the screen
+- **The model path's own work:** about 7%: strip boxes, the shape hash and
+  the ball. Changing meshsets still gather about 3,600 corners and light
+  1,500 on the EE.
+- **The game's own logic:** about 15%, which `fps 60` doubles.
+
+The profile is flat now: no one cost is above about 2%. `PS2_DEBUG := -g`
+in `ps2.mk` gives it source lines. Its 64-byte buckets can run into the
+next function, so a sample named for one function may belong to the one
+after it.
 
 ## What carries over
 
