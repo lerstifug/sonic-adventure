@@ -147,7 +147,7 @@ memory every frame by DMA.
 ## Toward 60 fps
 
 The aim is a picture in 16.7 ms on the EE (`fps 60`, `sa1_fast_on`). At the
-start of Emerald Coast it took 72 ms; it now takes about 45.5 ms. The steps so
+start of Emerald Coast it took 72 ms; it now takes about 40 ms. The steps so
 far:
 
 - **Blended strips on VU1.** A blended strip within every side joins the
@@ -173,6 +173,14 @@ far:
     once no stream reads it (`ps2_vu_release`).
 - **Blended strips across a side split by triangle,** as opaque ones are: a
   run within every side is kept for VU1, and only a run across is cut.
+- **A specular offset's second pass on VU1.** A blended strip whose offset
+  isn't 0 is drawn twice by `strip.vsm`, as `send_packet` draws it:
+  - **First pass:** the draw's own colour.
+  - **Second pass:** untextured and additive, with the offset as its colour,
+    faded by the corner's fog, and the GS's fog off.
+
+  Two spare lanes of the head choose the colour. This took 450 triangles a
+  picture off the EE, for about 5.5 ms.
 - **Smaller savings:**
   - the deferred sort sorts indices, not records
   - the palettes' and unlit words' zero checks run once a vsync, not once
@@ -184,17 +192,22 @@ far:
 
 What remains, roughly, by the report's counts and the profile:
 
-- **The EE's triangle path:** about 10% of the EE, for about 750 triangles
-  a picture:
-  - 480 from blended strips VU1 doesn't take, most likely those adding a
-    specular offset, which needs the EE's second, additive pass (a pass of
-    `strip.vsm`'s with the offset as its color would take them)
-  - 185 opaque triangles across the near plane
+- **The EE's triangle path:** about 10% of the EE, for about 300 triangles
+  a picture, at some 13 µs each:
+  - 185 opaque triangles across the near plane, which VU1 can't project
+    (a clipper in `model.vsm` would take them)
+  - 34 kept as triangles
   - 79 on the screen
-- **The model path's own work:** about 7%: strip boxes, the shape hash and
-  the ball. Changing meshsets still gather about 3,600 corners and light
-  1,500 on the EE.
-- **The game's own logic:** about 15%, which `fps 60` doubles.
+- **The model path's own work:** about 12%:
+  - strip boxes, 3.7%
+  - the shape hash and the ball over every point, 5%. The hash is needed:
+    shape motion blends into one shared buffer, and welding writes seam
+    points in place, so a point's change keeps its array's address.
+  - changing meshsets still gather about 3,600 corners and light 1,500 on
+    the EE
+- **The game's own logic and its maths:** about 28%, which `fps 60`
+  doubles. `sa_fipr` and `sa_ftrv` are already the FPU's (`PS2_MATH=fpu`);
+  their cost is the calls themselves.
 
 The profile is flat now: no one cost is above about 2%. `PS2_DEBUG := -g`
 in `ps2.mk` gives it source lines. Its 64-byte buckets can run into the

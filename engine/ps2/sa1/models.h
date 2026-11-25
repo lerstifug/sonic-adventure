@@ -373,12 +373,23 @@ static inline uint32_t models_mix(uint32_t h, uint32_t word)
 }
 
 /* a meshset's corners, and the hash of its u and v over them */
+/* the hash takes the first and last few words alone: the game moves u and
+ * v by scrolling them all (src/enemy/sai.c) or by writing a strip's first
+ * few (src/effect/effect.c), and each read of them all is a cache's miss a
+ * corner, each picture */
+#define MODELS_UV_ENDS 4
 static uint32_t models_uv_hash(const NJS_MESHSET *set, uint32_t corners)
 {
     uint32_t h = 2166136261U;
     const uint32_t *words = (const uint32_t *)set->vertuv;
 
-    for (uint32_t i = 0; words && i < corners; i++) {
+    if (!words) {
+        return h;
+    }
+    for (uint32_t i = 0; i < corners && i < MODELS_UV_ENDS; i++) {
+        h = models_mix(h, words[i]);
+    }
+    for (uint32_t i = corners > MODELS_UV_ENDS ? corners - MODELS_UV_ENDS : 0; i < corners; i++) {
         h = models_mix(h, words[i]);
     }
     return h;

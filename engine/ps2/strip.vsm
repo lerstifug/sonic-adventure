@@ -17,7 +17,10 @@
 ;   6       the screen's scale: focal x, focal y, the depth's most, 0
 ;   7       its bias: center x and y, as the GS's pixels place them
 ;   8       the color's scale: red, green, blue and alpha's, each of 1
-;   9       the texture's scale: u and v of the stored sides, over 255
+;   9       the texture's scale: u and v of the stored sides, over 255; then
+;           the offset's share of the color, over 255, and the color's own:
+;           0 and 1 for a draw's own pass, and 1/255 and 0 for its offset's,
+;           which adds the offset over it faded by the corner's fog
 ;   10      density, fogged (0 or 1), 1e30, highlighted (0 or 1)
 ;   11      4.0, 255.99, 255 times one less fogged, one less highlighted
 ;   12-     the corners, four qwords each, as the VIF unpacks them: the
@@ -109,7 +112,7 @@ strip_corner:
         addy.x VF25, VF00, VF25y NOP
         addz.y VF25, VF00, VF25z NOP
         subz.z VF25, VF00, VF25z NOP
-        ftoi0 VF13, VF13        NOP
+        NOP                     NOP
         maxw.x VF16, VF16, VF00w NOP
         miniy.x VF16, VF16, VF20y NOP
         NOP                     NOP
@@ -139,6 +142,11 @@ strip_corner:
         muly.x VF19, VF19, VF09y NOP
         addw.w VF15, VF00, VF00w NOP
         addz.x VF19, VF19, VF20z NOP
+        mulx.xyz VF30, VF14, VF19x NOP
+        mulw.xyz VF13, VF13, VF08w NOP
+        mulz.xyz VF30, VF30, VF08z NOP
+        add.xyz VF13, VF13, VF30 NOP
+        ftoi0 VF13, VF13        NOP
         NOP                     NOP
         NOP                     NOP
         NOP                     NOP
