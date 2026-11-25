@@ -162,11 +162,12 @@ constexpr uint32_t VU_FOG = 64, VU_PALETTE = 64, VU_PALETTE_ENTRIES = 256, VU_BA
 constexpr uint32_t VU_CORNERS = 48;
 static_assert(12 + VU_CORNERS * 7 + 1 <= VU_OFFSET, "a strip batch passes VU1's buffer");
 /* where VU1's model program lies in its code memory, in instructions, past
- * the strip program's; and a model batch's head, in qwords: its corners,
- * two qwords each, and the two qwords each sends, fit in 352 with it */
-constexpr uint32_t VU_MODEL_AT = 512, VU_MODEL_HEAD = 15;
-static_assert(VU_MODEL_HEAD + PS2_VU_CORNERS * 4 + 1 <= VU_OFFSET, "a model batch passes VU1's buffer");
-static_assert(PS2_VU_CORNERS * 2 <= 256, "a model batch's corners pass an UNPACK's count");
+ * the strip program's; and a model batch's head, in qwords, its GIF tag
+ * the last: its corners, three qwords each, which become what each sends
+ * in place, fit in 352 with it */
+constexpr uint32_t VU_MODEL_AT = 512, VU_MODEL_HEAD = 16;
+static_assert(VU_MODEL_HEAD + PS2_VU_CORNERS * 3 <= VU_OFFSET, "a model batch passes VU1's buffer");
+static_assert(PS2_VU_CORNERS * 3 <= 255, "a model batch's corners pass an UNPACK's count");
 /* the corners of the strips kept for the picture's end */
 constexpr uint32_t KEPT_CORNERS = 1U << 14;
 /* the triangles that blend a picture holds for its sort. past them a
@@ -512,9 +513,35 @@ uint32_t physical(const void *p)
     return static_cast<uint32_t>(reinterpret_cast<uintptr_t>(p)) & 0x0fffffffU;
 }
 
+/* a wait for the GS that passes 2 s says where VIF1 and the GIF stood,
+ * once a wait, and goes on waiting */
+constexpr uint32_t WAIT_SAY_US = 2000000;
+
+void stuck(const char *what)
+{
+    static int said;
+
+    if (said++ < 8) {
+        fprintf(stderr,
+                "sa1: %s waited 2 s: GS_CSR %08x, D1_CHCR %08x, D1_TADR %08x, D1_MADR %08x, D1_QWC %x, "
+                "VIF1_STAT %08x, GIF_STAT %08x\n",
+                what, static_cast<unsigned>(*GS_CSR), static_cast<unsigned>(*D1_CHCR),
+                static_cast<unsigned>(*D1_TADR), static_cast<unsigned>(*D1_MADR), static_cast<unsigned>(*D1_QWC),
+                static_cast<unsigned>(*reinterpret_cast<volatile uint32_t *>(0x10003c00)),
+                static_cast<unsigned>(*reinterpret_cast<volatile uint32_t *>(0x10003020)));
+    }
+}
+
 void vif_wait()
 {
+    uint32_t began = sceKernelGetSystemTimeLow();
+    bool said = false;
+
     while ((*D1_CHCR & CHCR_STR) != 0) {
+        if (!said && sceKernelGetSystemTimeLow() - began > WAIT_SAY_US) {
+            stuck("VIF1's DMA");
+            said = true;
+        }
     }
 }
 
@@ -665,7 +692,16 @@ void send_stream(Held &r, bool last)
     r.most_queue = std::max(r.most_queue, r.at * 4);
     /* the last picture shows from the buffer this stream would draw
      * into, till the blank after the GS has drawn it */
-    while (flip_pending >= 0) {
+    {
+        uint32_t began = sceKernelGetSystemTimeLow();
+        bool said = false;
+
+        while (flip_pending >= 0) {
+            if (!said && sceKernelGetSystemTimeLow() - began > WAIT_SAY_US) {
+                stuck("the flip");
+                said = true;
+            }
+        }
     }
     vif_wait();
     for (void *p : r.dying_sent) {
@@ -1056,6 +1092,20 @@ void apply(Held &r, const Draw &d)
 void drop_now(Held &r, Texture *t);
 void send_palette(Held &r, uint32_t index);
 void flush_deferred(Held &r);
+
+/* a palette's entry as model.vsm reads it, from its color and offset, ARGB:
+ * each's low 24 bits, red times 65536 plus green times 256 plus blue, a
+ * whole number a float holds exactly; the color's alpha; and the most of the
+ * offset's three, a highlight's */
+void palette_entry(float *f, uint32_t color, uint32_t offset)
+{
+    uint32_t most = std::max(offset >> 16 & 0xff, std::max(offset >> 8 & 0xff, offset & 0xff));
+
+    f[0] = static_cast<float>(color & 0xffffffU);
+    f[1] = static_cast<float>(offset & 0xffffffU);
+    f[2] = static_cast<float>(color >> 24);
+    f[3] = static_cast<float>(most);
+}
 
 /* a draw's state apart from its texture, for the sort */
 uint32_t state_key(const Draw &d)
@@ -3012,12 +3062,7 @@ extern "C" void ps2_vu_palette(uint32_t key, const uint32_t *colors, const uint3
             float *f = r.palette_room[r.pictures & 1] + index * pc::VU_PALETTE_ENTRIES * 4;
 
             for (uint32_t e = 0; e < pc::VU_PALETTE_ENTRIES; e++) {
-                uint32_t color = colors[e * 2];
-
-                f[4 * e] = static_cast<float>(color & 0xffffffU);
-                f[4 * e + 1] = offsets != nullptr ? static_cast<float>(offsets[e * 2] & 0xffffffU) : 0.0F;
-                f[4 * e + 2] = static_cast<float>(color >> 24);
-                f[4 * e + 3] = 0.0F;
+                pc::palette_entry(f + 4 * e, colors[e * 2], offsets != nullptr ? offsets[e * 2] : 0);
             }
             r.palette_keys.push_back(key);
             r.palette_now = index;
@@ -3041,14 +3086,7 @@ extern "C" void ps2_vu_palette(uint32_t key, const uint32_t *colors, const uint3
     float *f = reinterpret_cast<float *>(pc::words(r) + r.at);
 
     for (uint32_t e = 0; e < pc::VU_PALETTE_ENTRIES; e++) {
-        uint32_t color = colors[e * 2];
-
-        /* ARGB's low 24 bits are red times 65536 plus green times 256 plus
-         * blue, a whole number a float holds exactly */
-        f[4 * e] = static_cast<float>(color & 0xffffffU);
-        f[4 * e + 1] = offsets != nullptr ? static_cast<float>(offsets[e * 2] & 0xffffffU) : 0.0F;
-        f[4 * e + 2] = static_cast<float>(color >> 24);
-        f[4 * e + 3] = 0.0F;
+        pc::palette_entry(f + 4 * e, colors[e * 2], offsets != nullptr ? offsets[e * 2] : 0);
     }
     r.at += pc::VU_PALETTE_ENTRIES * 4;
     r.vu_palette = key;
@@ -3063,9 +3101,15 @@ extern "C" float *ps2_vu_open(const struct psp_state *state, const struct ps2_vu
         return nullptr;
     }
     pc::Draw d = pc::draw_of(r, *state);
+    bool textured = d.texture != nullptr, fogged = d.fog != SA_FOG_NONE, high = pc::highlights(d);
 
-    pc::begin_draw(r, d, 16 + pc::VU_MODEL_HEAD * 4 + 4 + PS2_VU_CORNERS * 8 + 8, true);
-    pc::room(r, 8 + pc::VU_MODEL_HEAD * 4 + 4 + PS2_VU_CORNERS * 8 + 8);
+    /* the fog table once a picture, to the stream, ahead of every deferred
+     * draw it serves */
+    if (fogged && !r.vu_fog) {
+        pc::send_vu_fog(r);
+    }
+    pc::begin_draw(r, d, 16 + pc::VU_MODEL_HEAD * 4 + 4 + PS2_VU_CORNERS * 12 + 8, true);
+    pc::room(r, 8 + pc::VU_MODEL_HEAD * 4 + 4 + PS2_VU_CORNERS * 12 + 8);
     pc::close_direct(r);
     while (r.at % 4 != 3) {
         pc::put(r, 0);
@@ -3074,21 +3118,33 @@ extern "C" float *ps2_vu_open(const struct psp_state *state, const struct ps2_vu
     uint32_t *w = pc::words(r) + r.at;
     float *h = reinterpret_cast<float *>(w);
 
-    r.model_prim = GS_SETREG_PRIM(GS_PRIM_PRIM_TRISTRIP, 1, 0, 0, d.blend ? 1 : 0, 0, 0, 0, 0);
+    r.model_prim = GS_SETREG_PRIM(GS_PRIM_PRIM_TRISTRIP, 1, textured ? 1 : 0, fogged ? 1 : 0, d.blend ? 1 : 0, 0, 0,
+                                  0, 0);
     memset(w, 0, pc::VU_MODEL_HEAD * 16);
+    /* the fog's terms, as send_vu gives strip.vsm them */
+    h[0] = r.fog.density;
+    h[1] = fogged ? 1.0F : 0.0F;
+    h[2] = fogged ? 0.0F : 255.0F;
+    h[3] = 4.0F;
     memcpy(h + 8, r.place.matrix, 16 * sizeof(float));
     h[24] = r.place.screen[0];
     h[25] = r.place.screen[1];
     h[26] = pc::DEPTH_MOST;
+    h[27] = high ? 0.0F : 1.0F;
     h[28] = r.place.screen[2] + static_cast<float>(r.gs->OffsetX) / 16.0F;
     h[29] = r.place.screen[3] - pc::crop() + static_cast<float>(r.gs->OffsetY) / 16.0F;
+    /* a highlight's offset: the palette's, or each corner's own */
+    h[30] = high && !shade->corner_offsets ? 1.0F : 0.0F;
+    h[31] = high && shade->corner_offsets ? 1.0F : 0.0F;
     /* the GS's 1 is 0x80: alpha always halved, the three where a texture
      * modulates them */
-    float halve = d.texture != nullptr && !d.decal ? 128.0F / 255.0F : 1.0F;
+    float halve = textured && !d.decal ? 128.0F / 255.0F : 1.0F;
 
     h[32] = h[33] = h[34] = halve;
     h[35] = 128.0F / 255.0F;
     h[36] = 1e30F;
+    h[37] = textured ? d.texture->su / 255.0F : 0.0F;
+    h[38] = textured ? d.texture->sv / 255.0F : 0.0F;
     h[39] = 2048.0F;
     memcpy(h + 40, shade->light, 3 * sizeof(float));
     memcpy(h + 44, shade->scale, 4 * sizeof(float));
@@ -3122,14 +3178,15 @@ extern "C" void ps2_vu_close(uint32_t count)
         return;
     }
     uint32_t *w = pc::words(r);
-    u64 *tag = reinterpret_cast<u64 *>(w + r.model_head);
+    /* the strip's GIF tag, the head's last qword, right before the corners
+     * VU1 turns into the strip in place */
+    u64 *tag = reinterpret_cast<u64 *>(w + r.model_head + (pc::VU_MODEL_HEAD - 1) * 4);
 
-    tag[0] = GIF_TAG(count, 1, 1, r.model_prim, GSKIT_GIF_FLG_PACKED, 2);
-    tag[1] = GS_RGBAQ | pc::GS_XYZF2_REG << 4;
+    tag[0] = GIF_TAG(count, 1, 1, r.model_prim, GSKIT_GIF_FLG_PACKED, 3);
+    tag[1] = GS_ST | GS_RGBAQ << 4 | pc::GS_XYZF2_REG << 8;
     w[r.model_head + 4] = count;
-    w[r.model_unpack] =
-        pc::vif_code(pc::UNPACK_V4_32, (count * 2) & 0xff, pc::UNPACK_TOPS | pc::VU_MODEL_HEAD);
-    r.at = r.model_unpack + 1 + count * 8;
+    w[r.model_unpack] = pc::vif_code(pc::UNPACK_V4_32, count * 3, pc::UNPACK_TOPS | pc::VU_MODEL_HEAD);
+    r.at = r.model_unpack + 1 + count * 12;
     pc::put(r, pc::vif_code(pc::VIF_MSCAL, 0, pc::VU_MODEL_AT));
     r.vu_since = true;
     r.triangles += count - 2;

@@ -143,16 +143,19 @@ void psp_sound_report(void);
 /* the PS2's own model path (engine/ps2/sa1/models.h): a batch of VU1's
  * (engine/ps2/model.vsm) under state, the place and the screen last given,
  * lit by the palette last sent as shade says. ps2_vu_open gives room for
- * PS2_VU_CORNERS corners, eight floats each: the point's x, y and z in the
- * model's space, and the corner's word, as model.vsm reads it, then the
- * normal's x, y and z, and 0. ps2_vu_close sends the batch of count
- * corners written, or none for fewer than 3. null where no picture is
- * open */
+ * PS2_VU_CORNERS corners, twelve floats each: the point's x, y and z in the
+ * model's space, and the corner's word, as model.vsm reads it; the normal's
+ * x, y and z, and the most of the corner's offset's three, of 255, where
+ * shade takes the corners' offsets; the u and v, 255 to the texture's side,
+ * and 0, 0. ps2_vu_close sends the batch of count corners written, or none
+ * for fewer than 3. null where no picture is open */
 #define PS2_VU_CORNERS 80
 struct ps2_vu_shade {
     float light[3]; /* the light in the model's space, to dot with a normal */
     float scale[4]; /* the palette's color's red, green, blue and alpha by */
     float add[4];   /* and what adds to each, of 255 */
+    /* a highlight takes each corner's offset, not the palette's */
+    int corner_offsets;
 };
 float *ps2_vu_open(const struct psp_state *state, const struct ps2_vu_shade *shade);
 void ps2_vu_close(uint32_t count);

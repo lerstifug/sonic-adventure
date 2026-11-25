@@ -1,38 +1,28 @@
 /* the PS2's own model path, which records.c includes beside the walk
  * (engine/psp/sa1/walk.h) and draws by in its place where the settings'
  * models 1 asks (engine/ps2/main.c). the walk lights and makes each corner
- * on the EE; here the EE only gathers each corner's point and normal into a
- * batch of VU1's (engine/ps2/model.vsm, through gs.cpp's ps2_vu_open), and
- * VU1 does the rest. it comes in stages, each drawn and checked before the
- * next:
+ * on the EE; here the EE only gathers each corner's point, normal and u and
+ * v into a batch of VU1's (engine/ps2/model.vsm, through gs.cpp's
+ * ps2_vu_open), and VU1 does the rest. it came in stages, each drawn and
+ * checked before the next (engine/ps2/RENDERER.md):
  *
- * 1. a model's polygons, every one opaque and untextured. a strip of a
- *    model whose ball reaches past the raster's reach goes whole where its
- *    box lies within every side, not at all where it lies past one side,
- *    and else by the walk's cut, on the EE
+ * 1. a model's polygons. a strip of a model whose ball reaches past the
+ *    raster's reach goes whole where its box lies within every side, not at
+ *    all where it lies past one side, and else by the walk's cut, on the EE
  * 2. SA1's palettes' light, as the walk gives it: a point takes the entry
  *    of the picture's palette its normal's dot with the light picks, and a
  *    meshset's material whitens, holds a constant color or takes its own
  *    alpha as the walk's does. the palette goes to VU1's memory, and the
- *    material's ways go as a scale of the entry's color and what adds to
- *    it. a model under Ninja's own drawers takes a flat color of its
- *    meshset's still
+ *    material's ways go as a scale of the entry's color and what adds to it
+ * 3. textures, the fog, and highlights: a corner's u and v are the
+ *    meshset's, or an env map's of its normal; a highlight is the palette's
+ *    offset, or the unlit words' where the walk takes those. a meshset that
+ *    blends goes as the walk's do, on the EE, to the picture's sort of the
+ *    blends, and a model under Ninja's own drawers goes by the walk
  *
  * a corner's word (model.vsm): 2 where it starts a strip, so it draws
  * nothing, else the cull's turn for the triangle it ends */
 #define MODELS_START 2.0F
-
-/* the color of a model's meshset, by both: each of the three from 64 to
- * 255, so each meshset stands out from the next, ARGB */
-static uint32_t models_color(const NJS_MODEL *model, uint32_t set)
-{
-    uint32_t h = (uint32_t)(uintptr_t)model * 2654435761U + (set + 1) * 40503U;
-
-    h ^= h >> 13;
-    h *= 2246822519U;
-    h ^= h >> 16;
-    return 0xff000000U | (64U + (h & 0xbfU)) << 16 | (64U + (h >> 8 & 0xbfU)) << 8 | (64U + (h >> 16 & 0xbfU));
-}
 
 /* shade adds argb whole and takes none of the palette's */
 static void models_flat(struct ps2_vu_shade *shade, uint32_t argb)
@@ -46,16 +36,20 @@ static void models_flat(struct ps2_vu_shade *shade, uint32_t argb)
     shade->add[3] = (float)(argb >> 24);
 }
 
-/* a corner's color, RGBA in memory, as model.vsm makes it of the palette's
- * colors, for a strip the EE cuts */
-static uint32_t models_lit(const struct ps2_vu_shade *shade, const uint32_t *colors,
-                           const NJS_VECTOR *normal)
+/* the palette's entry a normal's dot with the light picks */
+static uint32_t models_entry(const struct ps2_vu_shade *shade, const NJS_VECTOR *normal)
 {
-    float dot = normal ? normal->x * shade->light[0] + normal->y * shade->light[1] +
-                             normal->z * shade->light[2]
+    float dot = normal ? normal->x * shade->light[0] + normal->y * shade->light[1] + normal->z * shade->light[2]
                        : 0.0F;
     float scaled = dot * 127.5F + 127.5F;
-    int entry = scaled > 0.0F ? (scaled < 255.0F ? (int)scaled : 255) : 0;
+
+    return scaled > 0.0F ? (scaled < 255.0F ? (uint32_t)scaled : 255U) : 0U;
+}
+
+/* a corner's color, RGBA in memory, as model.vsm makes it of the palette's
+ * colors, for a strip the EE draws */
+static uint32_t models_lit(const struct ps2_vu_shade *shade, const uint32_t *colors, uint32_t entry)
+{
     uint32_t word = colors ? colors[entry * 2] : 0;
     float from[4] = {(float)(word >> 16 & 0xff), (float)(word >> 8 & 0xff), (float)(word & 0xff),
                      (float)(word >> 24)};
@@ -68,6 +62,15 @@ static uint32_t models_lit(const struct ps2_vu_shade *shade, const uint32_t *col
         rgba |= byte << (8 * k);
     }
     return rgba;
+}
+
+/* the most of an ARGB word's three */
+static uint32_t models_most(uint32_t argb)
+{
+    uint32_t r = argb >> 16 & 0xff, g = argb >> 8 & 0xff, b = argb & 0xff;
+    uint32_t m = r > g ? r : g;
+
+    return m > b ? m : b;
 }
 
 /* where a strip's box lies against the raster's sides, as gs.cpp's box_of
@@ -115,45 +118,59 @@ static int models_box(const float *m, const NJS_POINT3 *points, uint32_t count_p
     return every != 0 ? 1 : any != 0 ? 2 : 0;
 }
 
-/* a strip across a side, by the walk's cut on the EE, lit as VU1 lights */
-static void models_cut(const NJS_MODEL *model, uint32_t count_points, const Sint16 *at, uint32_t n,
-                       int reversed, const struct psp_state *drawn, const struct ps2_vu_shade *shade,
-                       const uint32_t *colors)
+/* what a meshset's corners are made of, on VU1 or the EE */
+struct models_set {
+    const NJS_MODEL *model;
+    const float *m;
+    uint32_t count_points;
+    const NJS_COLOR *uv;           /* the meshset's, by corner, or null */
+    int env;                       /* its u and v are the normal's, in view space */
+    const uint32_t *colors;        /* the palette's, or null */
+    const uint32_t *offsets;       /* its offsets' palette, or null */
+    int unlit_offsets;             /* the offset is the unlit words', by point */
+    struct ps2_vu_shade shade;
+};
+
+/* point i's u and v at corner, 255 to the texture's side */
+static inline void models_uv(const struct models_set *w, uint32_t i, uint32_t corner, float *u, float *v)
 {
-    static struct psp_corner strip[WALK_STRIP];
+    if (w->env) {
+        const NJS_VECTOR *n = &w->model->normals[i];
+        const float *m = w->m;
 
-    if (n > WALK_STRIP) {
-        return;
+        *u = ((n->x * m[0] + n->y * m[4] + n->z * m[8]) * 0.5F + 0.5F) * 255.0F;
+        *v = ((n->x * m[1] + n->y * m[5] + n->z * m[9]) * 0.5F + 0.5F) * 255.0F;
+    } else if (w->uv) {
+        *u = (float)w->uv[corner].tex.u;
+        *v = (float)w->uv[corner].tex.v;
+    } else {
+        *u = *v = 0.0F;
     }
-    for (uint32_t k = 0; k < n; k++) {
-        uint32_t i = (uint16_t)at[k];
-        const NJS_POINT3 *p;
-
-        i = i < count_points ? i : 0;
-        p = &model->points[i];
-        strip[k] = (struct psp_corner){.color = models_lit(shade, colors, model->normals ? &model->normals[i] : NULL),
-                                       .x = p->x,
-                                       .y = p->y,
-                                       .z = p->z};
-    }
-    psp_draw_state(drawn);
-    psp_draw_cut(strip, n, reversed, NULL, 0.0F);
 }
 
-/* a corner's point and normal into a batch, with its word */
-static inline void models_corner(float *out, const NJS_MODEL *model, uint32_t count_points, uint32_t i,
-                                 float word)
+/* point i's offset, ARGB */
+static inline uint32_t models_offset(const struct models_set *w, uint32_t i, uint32_t entry)
+{
+    if (w->unlit_offsets) {
+        return sa1_live_colors[SA_CAP_PALETTES_COUNT * SA_CAP_PALETTE_ENTRIES * 2 +
+                               (i < SA_CAP_UNLIT_OFFSETS ? i : 0)];
+    }
+    return w->offsets ? w->offsets[entry * 2] : 0;
+}
+
+/* a corner of point i, the meshset's corner'th, into a batch, with its word */
+static inline void models_corner(float *out, const struct models_set *w, uint32_t i, uint32_t corner, float word)
 {
     const NJS_POINT3 *p;
 
-    i = i < count_points ? i : 0;
-    p = &model->points[i];
+    i = i < w->count_points ? i : 0;
+    p = &w->model->points[i];
     out[0] = p->x;
     out[1] = p->y;
     out[2] = p->z;
     out[3] = word;
-    if (model->normals) {
-        const NJS_VECTOR *n = &model->normals[i];
+    if (w->model->normals) {
+        const NJS_VECTOR *n = &w->model->normals[i];
 
         out[4] = n->x;
         out[5] = n->y;
@@ -161,12 +178,42 @@ static inline void models_corner(float *out, const NJS_MODEL *model, uint32_t co
     } else {
         out[4] = out[5] = out[6] = 0.0F;
     }
-    out[7] = 0.0F;
+    out[7] = w->shade.corner_offsets ? (float)models_most(models_offset(w, i, 0)) : 0.0F;
+    models_uv(w, i, corner, &out[8], &out[9]);
+    out[10] = out[11] = 0.0F;
+}
+
+/* a strip's corners as the raster takes them, lit as VU1 lights, for the
+ * EE's draws: a strip across a side, and one that blends */
+static void models_strip(struct psp_corner *strip, const struct models_set *w, const Sint16 *at, uint32_t n,
+                         uint32_t corner)
+{
+    for (uint32_t k = 0; k < n; k++) {
+        uint32_t i = (uint16_t)at[k];
+        const NJS_VECTOR *normal;
+        uint32_t entry;
+        float u, v;
+
+        i = i < w->count_points ? i : 0;
+        normal = w->model->normals ? &w->model->normals[i] : NULL;
+        entry = models_entry(&w->shade, normal);
+        models_uv(w, i, corner + k, &u, &v);
+        strip[k] = (struct psp_corner){.u = (int16_t)(u > 32767.0F ? 32767 : u < -32768.0F ? -32768 : (int)u),
+                                       .v = (int16_t)(v > 32767.0F ? 32767 : v < -32768.0F ? -32768 : (int)v),
+                                       .color = models_lit(&w->shade, w->colors, entry),
+                                       .x = w->model->points[i].x,
+                                       .y = w->model->points[i].y,
+                                       .z = w->model->points[i].z,
+                                       .offset = walk_rgba(models_offset(w, i, entry))};
+    }
 }
 
 /* draw model under state, 1, or leave it out, 0 */
 static int models_draw(const NJS_MODEL *model, uint8_t mode, const struct draw_state *state)
 {
+    static sa_cap_material materials[WALK_MATERIALS];
+    static uint8_t cuts[WALK_MATERIALS];
+    static struct psp_corner strip[WALK_STRIP];
     const float *m = native_xmtrx();
     const NJS_POINT3 *points = model->points;
     uint32_t count_points = (uint32_t)model->nbPoint;
@@ -176,14 +223,31 @@ static int models_draw(const NJS_MODEL *model, uint8_t mode, const struct draw_s
     float down = psp_draw_reach() * 240.0F / sa1_screen.scale_y;
     const NJS_POINT3 *c = &model->center;
     double seen[3] = {sa1_live_light.x, sa1_live_light.y, sa1_live_light.z};
-    int by_palette = mode == SA_SHADE_PALETTE;
-    const uint32_t *colors = NULL;
+    const uint32_t *colors = NULL, *offsets = NULL;
     uint32_t constant;
     float light[3];
     int cutting, white = 0;
 
+    /* Ninja's own drawers light by their own ways, which the walk has */
+    if (mode != SA_SHADE_PALETTE) {
+        return walk_model(model, mode, state);
+    }
     if (!walk_open || model->nbMeshset == 0 || count_points == 0 || count > WALK_MATERIALS) {
         return 0;
+    }
+    /* the materials as the walk takes them, its textures made at the first
+     * draw; a model whose texture the raster can't make goes by the walk,
+     * which leaves it out and says so */
+    walk_refused = 0;
+    for (uint32_t i = 0; i < count; i++) {
+        const sa_cap_material *made = &materials[i];
+
+        materials[i] = material_as_drawn(&model->mats[i], mode, state, 0);
+        cuts[i] = (made->flags & SA_MAT_BLEND) && (made->flags & SA_MAT_TEXTURE) && made->src == SA_BLEND_SRC_ALPHA &&
+                  made->dst == SA_BLEND_INV_SRC_ALPHA && made->alpha == 255 && psp_texture_cuts(made->texture);
+    }
+    if (walk_refused) {
+        return walk_model(model, mode, state);
     }
     /* the light in the model's space, by its dots with the rows that carry
      * the model's axes to the view's, as the walk finds it */
@@ -209,13 +273,13 @@ static int models_draw(const NJS_MODEL *model, uint8_t mode, const struct draw_s
               !(down * eye[2] - fabsf(eye[1]) >= radius * sqrtf(1.0F + down * down));
     /* the picture's palette, and the offsets of the next where the model's
      * first material asks for a highlight, as the walk reads them */
-    if (by_palette && model->normals) {
-        uint32_t spec = count > 0 && (material_as_drawn(&model->mats[0], mode, state, 0).flags & SA_MAT_SPECULAR);
+    if (model->normals) {
+        uint32_t spec = count > 0 && (materials[0].flags & SA_MAT_SPECULAR);
         uint32_t pal = (state->palette & 7U) + (spec ? 1U : 0U);
 
         colors = sa1_live_colors + state->palette * SA_PALETTE_ENTRIES * 2;
-        ps2_vu_palette(state->palette | spec << 8, colors,
-                       pal < SA_CAP_PALETTES_COUNT ? sa1_live_colors + pal * SA_CAP_PALETTE_ENTRIES * 2 + 1 : NULL);
+        offsets = pal < SA_CAP_PALETTES_COUNT ? sa1_live_colors + pal * SA_CAP_PALETTE_ENTRIES * 2 + 1 : NULL;
+        ps2_vu_palette(state->palette | spec << 8, colors, offsets);
     }
     constant = argb(1.0, state->material.r, state->material.g, state->material.b);
     view_id(1);
@@ -224,73 +288,118 @@ static int models_draw(const NJS_MODEL *model, uint8_t mode, const struct draw_s
     for (uint32_t s = 0; s < model->nbMeshset; s++) {
         const NJS_MESHSET *set = &model->meshsets[s];
         uint32_t named = set->type_matId & MATERIAL_ID;
-        sa_cap_material material = named < count ? material_as_drawn(&model->mats[named], mode, state, 0)
-                                                 : (sa_cap_material){0};
-        int cull = (material.flags & SA_MAT_CULL) != 0;
-        int blended = (material.flags & SA_MAT_BLEND) != 0;
-        struct ps2_vu_shade shade = {.light = {light[0], light[1], light[2]},
-                                     .scale = {1.0F, 1.0F, 1.0F, 1.0F}};
+        const sa_cap_material *material = &materials[named < count ? named : 0];
+        int cull = (material->flags & SA_MAT_CULL) != 0;
+        int blended = (material->flags & SA_MAT_BLEND) != 0;
+        int cut = named < count && cuts[named];
+        struct models_set w = {
+            .model = model,
+            .m = m,
+            .count_points = count_points,
+            .uv = set->vertuv,
+            .env = (material->flags & SA_MAT_ENV) && model->normals,
+            .colors = colors,
+            .offsets = offsets,
+            .unlit_offsets = (material->flags & SA_MAT_UNLIT) && (material->flags & SA_MAT_TEXTURE),
+            .shade = {.light = {light[0], light[1], light[2]}, .scale = {1.0F, 1.0F, 1.0F, 1.0F}},
+        };
         struct psp_state drawn = {
+            .texture = material->flags & SA_MAT_TEXTURE ? material->texture : 0,
+            .decal = (material->flags & SA_MAT_DECAL) != 0,
+            .clamp_u = (material->flags & SA_MAT_CLAMP_U) != 0,
+            .clamp_v = (material->flags & SA_MAT_CLAMP_V) != 0,
+            .point = material->filter == SA_FILTER_POINT,
             .depth = (uint8_t)((state->isp & ISP_DEPTH) >> ISP_DEPTH_SHIFT),
             .depth_write = !(state->isp & ISP_Z_WRITE_DISABLE),
+            .cut = (uint8_t)cut,
+            .blend = (uint8_t)(blended && !cut),
+            .src = material->src,
+            .dst = material->dst,
+            .offset = (material->flags & SA_MAT_OFFSET) != 0,
+            .fog = (uint8_t)((state->tsp & TSP_FOG) >> TSP_FOG_SHIFT),
+            .flip_u = (material->flags & SA_MAT_FLIP_U) != 0,
+            .flip_v = (material->flags & SA_MAT_FLIP_V) != 0,
         };
         const Sint16 *at = set->meshes;
         float *out = NULL;
-        uint32_t used = 0;
+        uint32_t used = 0, corner = 0;
 
+        if (named >= count) {
+            continue;
+        }
+        w.shade.corner_offsets = w.unlit_offsets;
         /* SA1's shade, as the walk's: a meshset under SA_MAT_WHITE leaves
-         * the draw's points white for itself and each meshset after it */
-        white |= (material.flags & SA_MAT_WHITE) != 0;
-        if (!by_palette) {
-            models_flat(&shade, models_color(model, s));
-        } else {
-            /* a point's color is its entry's: white where a meshset that
-             * blends is unlit, and once a meshset whitened. one that blends
-             * takes its material's alpha. a constant color stands in every
-             * point's place, and with no normals each point is white */
-            int whiten = white || (blended && (material.flags & SA_MAT_UNLIT));
-            uint32_t alpha = blended ? (uint32_t)material.alpha : 255U;
+         * the draw's points white for itself and each meshset after it. a
+         * point's color is its entry's: white where a meshset that blends
+         * is unlit, and once a meshset whitened. one that blends takes its
+         * material's alpha. a constant color stands in every point's
+         * place, and with no normals each point is white */
+        white |= (material->flags & SA_MAT_WHITE) != 0;
+        {
+            int whiten = white || (blended && (material->flags & SA_MAT_UNLIT));
+            uint32_t alpha = blended ? (uint32_t)material->alpha : 255U;
 
-            if (material.flags & SA_MAT_CONSTANT) {
-                models_flat(&shade, (constant & 0x00ffffffU) | alpha << 24);
+            if (material->flags & SA_MAT_CONSTANT) {
+                models_flat(&w.shade, (constant & 0x00ffffffU) | alpha << 24);
             } else if (!model->normals) {
-                models_flat(&shade, 0x00ffffffU | alpha << 24);
+                models_flat(&w.shade, 0x00ffffffU | alpha << 24);
             } else {
                 for (int k = 0; k < 3; k++) {
-                    shade.scale[k] = whiten ? 0.0F : 1.0F;
-                    shade.add[k] = whiten ? 255.0F : 0.0F;
+                    w.shade.scale[k] = whiten ? 0.0F : 1.0F;
+                    w.shade.add[k] = whiten ? 255.0F : 0.0F;
                 }
-                shade.scale[3] = blended ? 0.0F : 1.0F;
-                shade.add[3] = blended ? (float)alpha : 0.0F;
+                w.shade.scale[3] = blended ? 0.0F : 1.0F;
+                w.shade.add[3] = blended ? (float)alpha : 0.0F;
             }
         }
         for (uint32_t p = 0; p < set->nbMesh; p++) {
             uint32_t n;
             int reversed;
+            int box = 0;
 
             walk_polygon(set, &at, &n, &reversed);
             if (n < 3) {
                 at += n;
+                corner += n;
                 continue;
             }
             if (cutting) {
-                int box = models_box(m, points, count_points, at, n);
-
+                box = models_box(m, points, count_points, at, n);
                 if (box == 1) {
                     at += n;
+                    corner += n;
                     continue;
                 }
-                if (box == 2) {
-                    /* the cut writes the stream: the open batch goes first */
-                    if (out) {
-                        ps2_vu_close(used);
-                        out = NULL;
+            }
+            /* a strip that blends, or one across a side, goes on the EE: the
+             * open batch goes first, as the EE's draw writes the stream */
+            if (drawn.blend || box == 2) {
+                if (out) {
+                    ps2_vu_close(used);
+                    out = NULL;
+                }
+                if (n <= WALK_STRIP) {
+                    /* the cut takes the strip's turn on its own, as the
+                     * walk's does; a kept strip turns by its cull */
+                    drawn.cull = (uint8_t)(!cull ? 0 : box == 2 || !reversed ? 1 : 2);
+                    if (box == 2) {
+                        models_strip(strip, &w, at, n, corner);
+                        if (!drawn.blend) {
+                            psp_draw_state(&drawn);
+                        }
+                        psp_draw_cut(strip, n, reversed, drawn.blend ? &drawn : NULL, eye[2]);
+                    } else {
+                        struct psp_corner *room = psp_draw_room(n, 1);
+
+                        if (room) {
+                            models_strip(room, &w, at, n, corner);
+                            psp_draw_later(eye[2], &drawn, room, n);
+                        }
                     }
-                    drawn.cull = (uint8_t)cull;
-                    models_cut(model, count_points, at, n, reversed, &drawn, &shade, colors);
-                    at += n;
-                    continue;
                 }
+                at += n;
+                corner += n;
+                continue;
             }
             /* the strip's corners into the batch, a new batch where it's
              * full, which goes on from the strip's last two corners */
@@ -302,23 +411,24 @@ static int models_draw(const NJS_MODEL *model, uint8_t mode, const struct draw_s
                     if (out) {
                         ps2_vu_close(used);
                     }
-                    if (!(out = ps2_vu_open(&drawn, &shade))) {
+                    if (!(out = ps2_vu_open(&drawn, &w.shade))) {
                         return 1;
                     }
                     used = 0;
                     for (uint32_t j = k - again; j < k; j++) {
-                        models_corner(out + 8 * used++, model, count_points, (uint16_t)at[j], MODELS_START);
+                        models_corner(out + 12 * used++, &w, (uint16_t)at[j], corner + j, MODELS_START);
                     }
                 }
                 /* the triangle a corner ends turns as the strip's first, or
                  * the other way for each odd one, and for a reversed strip */
-                models_corner(out + 8 * used++, model, count_points, (uint16_t)at[k],
+                models_corner(out + 12 * used++, &w, (uint16_t)at[k], corner + k,
                               k < 2   ? MODELS_START
                               : !cull ? 0.0F
                                       : ((k - 2) & 1) != (uint32_t)(reversed != 0) ? -1.0F
                                                                                    : 1.0F);
             }
             at += n;
+            corner += n;
         }
         if (out) {
             ps2_vu_close(used);

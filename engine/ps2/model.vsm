@@ -1,42 +1,58 @@
 ; the PS2's VU1 program for a model's batch (engine/ps2/gs.cpp's
 ; ps2_vu_open and ps2_vu_close, which engine/ps2/sa1/models.h fills): the
 ; corners of one or more of a meshset's strips, each carried by the model's
-; matrix to view space, projected, lit, culled, and sent to the GS as one
-; triangle strip by XGKICK. the strips join with no corner of their own:
-; each strip's first two corners draw nothing, by XYZF2's ADC bit, which the
-; GS takes as XYZF3.
+; matrix to view space, projected, lit, textured, fogged, culled, and sent to
+; the GS as one triangle strip by XGKICK. the strips join with no corner of
+; their own: each strip's first two corners draw nothing, by XYZF2's ADC bit,
+; which the GS takes as XYZF3.
 ;
 ; VU1's memory: qwords 0 to 63 hold the picture's fog table (strip.vsm's),
 ; 64 to 319 the palette models.h's draws light by, and from 320 two buffers
 ; of 352 qwords take turns (VIF's BASE and OFFSET). XTOP gives this batch's:
 ;
-;   0       the GIF tag of the strip: PRE, PRIM, PACKED, RGBAQ XYZF2
+;   0       the fog's terms: density, fogged (0 or 1), 255 times one less
+;           fogged, 4
 ;   1       x: the corners' count, an integer
 ;   2-5     the model's matrix, Ninja's rows: a point is a row times it
-;   6       the screen's scale: focal x, focal y, the depth's most, 0
-;   7       its bias: center x and y, as the GS's pixels place them
+;   6       the screen's scale: focal x, focal y, the depth's most, and one
+;           less highlighted
+;   7       its bias: center x and y, as the GS's pixels place them; then
+;           the highlight's share of the palette's offset and of the
+;           corner's, each 0 or 1
 ;   8       the color's scale for the GS: red, green, blue and alpha's
-;   9       1e30, 0, 0, 2048: the ADC bit of XYZF2's fourth word over 16
+;   9       1e30; the texture's scale, u and v of the stored sides over 255;
+;           2048, the ADC bit of XYZF2's fourth word over 16
 ;   10      the light in the model's space: x, y, z, 0
 ;   11      the palette's color's scale: red, green, blue, alpha
 ;   12      what adds to it: red, green, blue, alpha, of 255
 ;   13      127.5, 255, 1/65536, 1/256
 ;   14      65536, 256, 0, 0
-;   15-     the corners, two qwords each: the point's x, y and z, and the
-;           corner's word; then the normal's x, y and z, and 0. the word is
-;           2 where the corner starts a strip, else the cull's turn for the
-;           triangle it ends, 1 to drop it where its pixels turn one way, -1
-;           the other, 0 never
-;   15+2n   the strip as the GS takes it: the GIF tag, then for each
-;           corner RGBAQ and XYZF2
+;   15      the GIF tag of the strip: PRE, PRIM, PACKED, ST RGBAQ XYZF2
+;   16-     the corners, three qwords each: the point's x, y and z, and the
+;           corner's word; the normal's x, y and z, and the corner's own
+;           offset's most of its three, of 255; the u and v, in the
+;           texture's 255 to a side, and 0, 0. the word is 2 where the
+;           corner starts a strip, else the cull's turn for the triangle it
+;           ends, 1 to drop it where its pixels turn one way, -1 the other,
+;           0 never
+;
+; each corner's three qwords become what the GS takes of it, in place: ST
+; with Q, RGBAQ and XYZF2, after the tag at 15. a corner reads all three
+; before it writes, so the strip needs no room of its own. RGBAQ takes the
+; Q of the ST before it.
 ;
 ; a palette entry is a qword: its color's red, green and blue as one whole
 ; number, red times 65536 plus green times 256 plus blue, which a float
-; holds exactly; its offset's the same; and its color's alpha. a corner
-; takes the entry its normal's dot with the light picks, as the walk does
-; (engine/psp/sa1/walk.h): 127.5 plus 127.5 times the dot, held to 0 to
-; 255. its color is the entry's times the scale, plus the add, times the
-; GS's scale.
+; holds exactly; its offset's the same; its color's alpha; and its offset's
+; most of its three. a corner takes the entry its normal's dot with the
+; light picks, as the walk does (engine/psp/sa1/walk.h): 127.5 plus 127.5
+; times the dot, held to 0 to 255. its color is the entry's times the
+; scale, plus the add, times the GS's scale. a highlighted corner's alpha
+; is its offset's most, unscaled, which the GS's HIGHLIGHT2 adds to the
+; texel's three, as gs.cpp's send_packet gives it.
+;
+; the fog as strip.vsm's: the table's step of the square root of 1/z times
+; the density, held to 1 to 255.
 ;
 ; a corner's w goes to start = max(w - 1, 0) and turn = w - 2 start, and
 ; its triangle draws nothing where turn times its pixels' area, plus start,
@@ -49,6 +65,7 @@ VU1Model_CodeStart:
         NOP                     xtop VI02
         NOP                     NOP
         NOP                     ilw.x VI03, 1(VI02)
+        NOP                     lq VF21, 0(VI02)
         NOP                     lq VF01, 2(VI02)
         NOP                     lq VF02, 3(VI02)
         NOP                     lq VF03, 4(VI02)
@@ -62,19 +79,14 @@ VU1Model_CodeStart:
         NOP                     lq VF19, 12(VI02)
         NOP                     lq VF20, 13(VI02)
         NOP                     lq VF24, 14(VI02)
-        NOP                     lq VF21, 0(VI02)
-        NOP                     iaddiu VI04, VI02, 15
-        NOP                     iadd VI05, VI04, VI03
-        NOP                     iadd VI05, VI05, VI03
+        NOP                     iaddiu VI05, VI02, 15
+        NOP                     iaddiu VI04, VI02, 16
         sub.xy VF22, VF00, VF00 NOP
         sub.xy VF23, VF00, VF00 NOP
-        NOP                     NOP
-        NOP                     sq VF21, 0(VI05)
-        NOP                     iaddiu VI06, VI05, 1
 model_corner:
         NOP                     lq VF10, 0(VI04)
         NOP                     lq VF16, 1(VI04)
-        NOP                     NOP
+        NOP                     lq VF30, 2(VI04)
         NOP                     NOP
         NOP                     NOP
         mulax ACC, VF01, VF10x  NOP
@@ -83,8 +95,8 @@ model_corner:
         maddw VF11, VF04, VF00w NOP
         mul.xyz VF17, VF16, VF09 NOP
         subw.w VF12, VF10, VF00w NOP
-        NOP                     NOP
-        NOP                     NOP
+        muly.x VF30, VF30, VF08y NOP
+        mulz.y VF30, VF30, VF08z NOP
         NOP                     div Q, VF00w, VF11z
         mulax.w ACC, VF00, VF17x NOP
         madday.w ACC, VF00, VF17y NOP
@@ -109,8 +121,46 @@ model_corner:
         NOP                     waitq
         mulq.xy VF15, VF15, Q   NOP
         mulq.z VF15, VF05, Q    NOP
-        NOP                     NOP
+        mulq.xy VF30, VF30, Q   NOP
+        addq.z VF30, VF00, Q    NOP
+        mulq.x VF31, VF21, Q    NOP
         add.xy VF15, VF15, VF06 NOP
+        NOP                     NOP
+        NOP                     NOP
+        maxw.x VF31, VF31, VF00w NOP
+        NOP                     NOP
+        NOP                     NOP
+        NOP                     NOP
+        miniy.x VF31, VF31, VF20y NOP
+        NOP                     NOP
+        NOP                     NOP
+        NOP                     NOP
+        NOP                     sqrt Q, VF31x
+        NOP                     waitq
+        addq.x VF31, VF00, Q    NOP
+        NOP                     NOP
+        NOP                     NOP
+        NOP                     NOP
+        mulw.x VF31, VF31, VF21w NOP
+        NOP                     NOP
+        NOP                     NOP
+        NOP                     NOP
+        ftoi0.x VF31, VF31      NOP
+        NOP                     NOP
+        NOP                     NOP
+        NOP                     NOP
+        NOP                     mtir VI08, VF31x
+        NOP                     NOP
+        NOP                     NOP
+        NOP                     lq.x VF26, 0(VI08)
+        NOP                     NOP
+        NOP                     NOP
+        NOP                     NOP
+        muly.x VF26, VF26, VF21y NOP
+        NOP                     NOP
+        NOP                     NOP
+        NOP                     NOP
+        addz.x VF14, VF26, VF21z NOP
         mulz.x VF26, VF25, VF20z NOP
         NOP                     NOP
         NOP                     NOP
@@ -167,6 +217,12 @@ model_corner:
         NOP                     NOP
         NOP                     NOP
         NOP                     NOP
+        mulaw.w ACC, VF29, VF05w NOP
+        maddaz.w ACC, VF25, VF06z NOP
+        maddw.w VF29, VF16, VF06w NOP
+        NOP                     NOP
+        NOP                     NOP
+        NOP                     NOP
         ftoi0 VF13, VF29        NOP
         sub.xy VF26, VF23, VF22 NOP
         sub.xy VF27, VF15, VF22 NOP
@@ -207,14 +263,18 @@ model_corner:
         NOP                     NOP
         NOP                     NOP
         NOP                     NOP
+        addx.w VF15, VF15, VF14x NOP
+        NOP                     NOP
+        NOP                     NOP
+        NOP                     NOP
         ftoi4 VF15, VF15        NOP
         NOP                     NOP
         NOP                     NOP
         NOP                     NOP
-        NOP                     sq VF13, 0(VI06)
-        NOP                     sq VF15, 1(VI06)
-        NOP                     iaddiu VI06, VI06, 2
-        NOP                     iaddiu VI04, VI04, 2
+        NOP                     sq VF30, 0(VI04)
+        NOP                     sq VF13, 1(VI04)
+        NOP                     sq VF15, 2(VI04)
+        NOP                     iaddiu VI04, VI04, 3
         NOP                     isubiu VI03, VI03, 1
         NOP                     NOP
         NOP                     NOP

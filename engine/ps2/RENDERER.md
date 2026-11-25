@@ -93,6 +93,19 @@ memory every frame by DMA.
 3. **Textures on the VU1 path** (renderer stage 3 of the models' path):
    UVs, ST and Q from `model.vsm`, and highlights from the palette's offsets.
    It fits the draw list as one more kind of draw.
+
+   **Done**, under `models 1`. A corner is three qwords (point and word,
+   normal, u and v), and VU1 writes its ST, RGBAQ and XYZF2 over them in
+   place, after the GIF tag at the end of the head, so a batch still takes
+   80 corners. `model.vsm` also fogs as `strip.vsm` does. A highlight's
+   alpha is the offset's brightest channel: a palette entry carries it in
+   its fourth word, and a corner carries the unlit words' in its normal's.
+   Meshsets that blend go on the EE to the transparency sort, as the walk
+   sends them, and models under Ninja's own drawers go by the walk.
+
+   At the start of Emerald Coast, VU1 draws about 14,000 of a picture's
+   17,000 triangles, and the EE takes about 66 ms a picture, against 74 ms
+   with the walk.
 4. **Mipmaps** (`TEXTURES.md` stage 5), whose levels stream with their
    textures.
 5. **480i field rendering**, if the texture room is still short there.
