@@ -207,6 +207,61 @@ static inline void walk_polygon(const NJS_MESHSET *set, const Sint16 **at,
     }
 }
 
+#ifdef _EE
+/* the u and v units (255 to a texture's side) a meshset's strips span to a
+ * unit of its model's space: the root of their texture's area over their
+ * own, by its triangles. kept by the meshset's address and its u and v's,
+ * as a stage's models stay put; 0 for none */
+#define WALK_DENSITIES 4096
+static float walk_density(const NJS_MODEL *model, const NJS_MESHSET *set)
+{
+    static struct {
+        const NJS_MESHSET *set;
+        const NJS_COLOR *uv;
+        float density;
+    } kept[WALK_DENSITIES];
+    uint32_t slot = ((uint32_t)(uintptr_t)set >> 2) * 2654435761U >> 20 & (WALK_DENSITIES - 1);
+    const Sint16 *at = set->meshes;
+    uint32_t points = (uint32_t)model->nbPoint, corner = 0;
+    double texels = 0.0, area = 0.0;
+
+    if (kept[slot].set == set && kept[slot].uv == set->vertuv) {
+        return kept[slot].density;
+    }
+    for (uint32_t p = 0; set->vertuv && p < set->nbMesh; p++) {
+        uint32_t n;
+        int reversed;
+
+        walk_polygon(set, &at, &n, &reversed);
+        for (uint32_t k = 2; k < n; k++) {
+            uint32_t i[3] = {(uint16_t)at[k - 2], (uint16_t)at[k - 1], (uint16_t)at[k]};
+            const NJS_COLOR *uv = &set->vertuv[corner + k - 2];
+            const NJS_POINT3 *a, *b, *c;
+            double ex, ey, ez, fx, fy, fz, cx, cy, cz;
+
+            if (i[0] >= points || i[1] >= points || i[2] >= points) {
+                continue;
+            }
+            a = &model->points[i[0]];
+            b = &model->points[i[1]];
+            c = &model->points[i[2]];
+            ex = b->x - a->x, ey = b->y - a->y, ez = b->z - a->z;
+            fx = c->x - a->x, fy = c->y - a->y, fz = c->z - a->z;
+            cx = ey * fz - ez * fy, cy = ez * fx - ex * fz, cz = ex * fy - ey * fx;
+            area += sqrt(cx * cx + cy * cy + cz * cz);
+            texels += fabs((double)(uv[1].tex.u - uv[0].tex.u) * (uv[2].tex.v - uv[0].tex.v) -
+                           (double)(uv[2].tex.u - uv[0].tex.u) * (uv[1].tex.v - uv[0].tex.v));
+        }
+        at += n;
+        corner += n;
+    }
+    kept[slot].set = set;
+    kept[slot].uv = set->vertuv;
+    kept[slot].density = area > 0.0 && texels > 0.0 ? (float)sqrt(texels / area) : 0.0F;
+    return kept[slot].density;
+}
+#endif
+
 /* what a meshset's corners are made by */
 struct walk_set {
     const NJS_MODEL *model;
@@ -557,7 +612,12 @@ static int walk_model(const NJS_MODEL *model, uint8_t mode,
             .offset = (material->flags & SA_MAT_OFFSET) != 0,
             .fog = (uint8_t)((state->tsp & TSP_FOG) >> TSP_FOG_SHIFT),
             .flip_u = (material->flags & SA_MAT_FLIP_U) != 0,
-            .flip_v = (material->flags & SA_MAT_FLIP_V) != 0
+            .flip_v = (material->flags & SA_MAT_FLIP_V) != 0,
+            /* the density in view space, by the matrix's scale; an env
+             * map's u and v follow no surface */
+            .density = (material->flags & SA_MAT_TEXTURE) && !(material->flags & SA_MAT_ENV) && longest > 0.0F
+                           ? walk_density(model, set) / sqrtf(longest)
+                           : 0.0F
 #endif
         };
         const Sint16 *at = set->meshes;

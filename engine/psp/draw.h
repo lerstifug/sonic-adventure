@@ -49,6 +49,10 @@ struct psp_state {
      * the fog by its mode (SA_FOG_*), and the texture mirrored past 1 in u
      * or v (SA_MAT_FLIP_U, SA_MAT_FLIP_V) */
     uint8_t offset, fog, flip_u, flip_v;
+    /* the texture's u and v units (255 to its side) its strips span to a
+     * unit of view space, which picks its mip level by depth; 0 for none,
+     * and no mip levels */
+    float density;
 #endif
 };
 

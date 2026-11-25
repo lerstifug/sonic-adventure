@@ -7,9 +7,11 @@
  * the layout is Sony's TIM2, at its 128-byte alignment: the file's head,
  * padded to 128 bytes, then each picture: its head, padded to a multiple of
  * 128 bytes with what follows it, then its texels, then its CLUT, each a
- * multiple of 128 bytes. a picture's head is Tim2Picture, then TIM2's
- * extended head (Tim2Extended), then the game's terms (Tim2Terms), then the
- * PVR's name as the extended head's comment.
+ * multiple of 128 bytes. a picture's head is Tim2Picture, then, where it has
+ * mip levels, TIM2's mipmap head (Tim2Mips), then TIM2's extended head
+ * (Tim2Extended), then the game's terms (Tim2Terms), then the PVR's name as
+ * the extended head's comment. a picture's levels lie one after another,
+ * the largest first, each a multiple of 128 bytes, and share its CLUT.
  *
  * a picture's texels are the GS's, rows top first: 4-bit indices two to a
  * byte, the first in the low half, 8-bit indices, 16-bit texels (red's 5 bits
@@ -58,6 +60,22 @@ struct Tim2Picture {
 } __attribute__((packed));
 static_assert(sizeof(Tim2Picture) == 48, "TIM2's picture head is 48 bytes");
 
+/* the mipmap head of a picture of more than one level: the GS's MIPTBP1
+ * and MIPTBP2 at address 0 (their TBWs alone), and each level's bytes */
+struct Tim2Mips {
+    uint64_t miptbp1, miptbp2;
+    uint32_t sizes[8];
+};
+static_assert(sizeof(Tim2Mips) == 48, "TIM2's mipmap head is 48 bytes");
+/* the most levels a picture takes: the GS's 7, of sides 8 and up */
+constexpr uint32_t LEVELS_MOST = 7;
+
+/* where a picture's extended head lies past its head */
+inline uint32_t extended_at(uint8_t mipmaps)
+{
+    return static_cast<uint32_t>(sizeof(Tim2Picture) + (mipmaps > 1 ? sizeof(Tim2Mips) : 0));
+}
+
 struct Tim2Extended {
     char magic[4];        /* "eXt" */
     uint32_t user_space;  /* this head's bytes, the terms' and the comment's */
@@ -94,6 +112,10 @@ struct Lent {
     uint32_t side_w, side_h;  /* the texels' */
     uint32_t psm;             /* a GS_PSM_ */
     const void *texels;
+    /* its levels, 1 for the image alone: the rest, each half the last's
+     * sides, lie one after another past the texels, each of its bytes */
+    uint32_t levels;
+    uint32_t level_bytes[LEVELS_MOST];
     const void *clut;         /* null where none */
     uint32_t clut_colors;     /* 16 or 256, or 0 */
     bool cuts;

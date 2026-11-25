@@ -258,7 +258,15 @@ a second of decoding per large archive at load time.
    half (already in VU1's memory), and the textured material rules of the
    walk (unlit offsets, decal, environment mapping).
 5. **Mipmaps:** `MIPTBP1`/`MIPTBP2` per texture, and LOD from Q tuned
-   against the Dreamcast's look.
+   against the Dreamcast's look. **Done** (RENDERER.md's stage 4).
+   - **The converter** makes levels for each texture whose PVR had them:
+     each from the one above by a mean of four, weighted by alpha so clear
+     texels darken no edge, at the top's format, a CLUT's indices to its
+     nearest entries. Levels go down to sides of 8 (16 wide at 4 bits), 7
+     at most. They lie after the texels under TIM2's mipmap head, each
+     aligned to 128 bytes.
+   - **Output:** 12,256 of 15,900 pictures mipmapped, 291 MB in all
+     (from 256). `report.csv` gives each picture's levels.
 6. **Faster loads:** skip the game's own PVM read and decode where a `.tm2`
    exists.
 7. **Only if the log shows hitches:** background reads for the loads that

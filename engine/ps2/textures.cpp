@@ -12,6 +12,8 @@
  * find_place picks it, and its texels from the pack beside it
  * (textures.pak, engine/tools/textures_pack.cpp) */
 #include <malloc.h>
+
+#include <algorithm>
 #include <stdio.h>
 #include <string.h>
 
@@ -289,9 +291,11 @@ Tim2 *open_tm2(uint32_t file)
         ps2::Tim2Terms terms;
 
         memcpy(&p, t->bytes + at, sizeof p);
-        memcpy(&terms, t->bytes + at + sizeof p + sizeof(ps2::Tim2Extended), sizeof terms);
-        const char *name = reinterpret_cast<const char *>(t->bytes + at + sizeof p + sizeof(ps2::Tim2Extended) +
-                                                          sizeof terms);
+        uint32_t extended = ps2::extended_at(p.mipmaps);
+
+        memcpy(&terms, t->bytes + at + extended + sizeof(ps2::Tim2Extended), sizeof terms);
+        const char *name =
+            reinterpret_cast<const char *>(t->bytes + at + extended + sizeof(ps2::Tim2Extended) + sizeof terms);
 
         t->pictures.push_back({terms.global_index, std::string(name, strnlen(name, 64)), at});
         at += p.total;
@@ -327,8 +331,16 @@ uint32_t make_picture(Tim2 &t, const Picture &picture)
     const uint8_t *head = t.bytes + picture.at;
 
     memcpy(&p, head, sizeof p);
-    memcpy(&terms, head + sizeof p + sizeof(ps2::Tim2Extended), sizeof terms);
+    memcpy(&terms, head + ps2::extended_at(p.mipmaps) + sizeof(ps2::Tim2Extended), sizeof terms);
     const uint8_t *texels = head + p.head_bytes;
+    ps2::Tim2Mips mips{};
+    uint32_t levels = p.mipmaps > 1 ? std::min<uint32_t>(p.mipmaps, ps2::LEVELS_MOST) : 1;
+
+    if (levels > 1) {
+        memcpy(&mips, head + sizeof p, sizeof mips);
+    } else {
+        mips.sizes[0] = p.image_bytes;
+    }
     ps2::Lent lent = {terms.width,
                       terms.height,
                       p.width,
@@ -338,6 +350,9 @@ uint32_t make_picture(Tim2 &t, const Picture &picture)
                       : p.image_type == ps2::TIM2_32 ? ps2::GS_PSM_32
                                                      : ps2::GS_PSM_16,
                       texels,
+                      levels,
+                      {mips.sizes[0], mips.sizes[1], mips.sizes[2], mips.sizes[3], mips.sizes[4], mips.sizes[5],
+                       mips.sizes[6]},
                       p.clut_colors != 0 ? texels + p.image_bytes : nullptr,
                       p.clut_colors,
                       (terms.flags & ps2::TERMS_CUTS) != 0,

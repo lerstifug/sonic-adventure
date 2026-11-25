@@ -186,6 +186,8 @@ constexpr uint32_t FOG_TABLE = 0x200;
 constexpr int TFX_MODULATE = 0, TFX_DECAL = 1, TFX_HIGHLIGHT2 = 3;
 /* the GS's XYZF2, a corner's place with its fog */
 constexpr uint64_t GS_XYZF2_REG = 0x04;
+/* the GS's MIPTBP1 and MIPTBP2 of context 1, the mip levels' places */
+constexpr uint64_t GS_MIPTBP1_REG = 0x34, GS_MIPTBP2_REG = 0x36;
 constexpr uint64_t GS_FOGCOL_REG = 0x3d;
 
 struct Texture {
@@ -202,6 +204,14 @@ struct Texture {
     int32_t block = -1;
     uint32_t blocks = 0, texel_blocks = 0;
     uint32_t used = 0;
+    /* its mip levels, the first the texels themselves: each one's texels,
+     * sides, TBW, and blocks past the texture's place, where it lies */
+    struct Level {
+        const void *mem;
+        uint32_t w, h, tbw, at;
+    };
+    uint32_t levels = 1;
+    Level level[ps2::LEVELS_MOST] = {};
     /* a 4-bit or 8-bit texture's CLUT: 16 or 256 colors at 32 bits, as the
      * GS's CSM1 takes them */
     const void *clut = nullptr;
@@ -228,13 +238,17 @@ struct Draw {
     uint8_t cull = 0; /* 1 drops what turns clockwise, 2 what turns the other way */
     bool offset = false; /* the offset adds to the texel */
     uint8_t fog = SA_FOG_NONE;
+    /* the texture's mip levels drawn, and TEX1's K, the level at a depth of
+     * 1, in 16ths: by its texels' density on the model (draw_of) */
+    bool mip = false;
+    int16_t k = 0;
 
     bool same(const Draw &o) const
     {
         return texture == o.texture && decal == o.decal && alpha == o.alpha && clamp_u == o.clamp_u &&
                clamp_v == o.clamp_v && linear == o.linear && cut == o.cut && blend == o.blend && src == o.src &&
                dst == o.dst && depth == o.depth && depth_write == o.depth_write && offset == o.offset &&
-               fog == o.fog;
+               fog == o.fog && mip == o.mip && k == o.k;
     }
 };
 
@@ -380,6 +394,8 @@ struct Held {
     uint32_t deferred_most = 0, flushed_early = 0;
     /* textures bound in a picture, once each, and the sends before its blends */
     uint32_t distinct = 0, opaque_sends = 0, staging_most = 0;
+    /* MIPTBP1 and MIPTBP2 as last sent */
+    uint64_t miptbp1 = 0, miptbp2 = 0;
     /* the last draw begun waits in the list, for its offset pass to follow */
     bool base_deferred = false;
     /* whether the picture sent VU1 its fog table */
@@ -865,7 +881,19 @@ uint32_t blocks_of(uint32_t w, uint32_t h, uint32_t psm)
  * colors as 8 by 2 and 256 as 16 by 16 at 32 bits */
 void size_texture(Texture *t)
 {
-    t->texel_blocks = blocks_of(t->gs.Width, t->gs.Height, t->gs.PSM);
+    uint32_t at = 0;
+
+    if (t->levels < 1 || t->level[0].mem == nullptr) {
+        t->levels = 1;
+        t->level[0] = {t->gs.Mem, t->gs.Width, t->gs.Height, t->gs.TBW, 0};
+    }
+    /* a level of a page or more starts a page, which the levels before it
+     * end at, as each takes whole pages */
+    for (uint32_t l = 0; l < t->levels; l++) {
+        t->level[l].at = at;
+        at += blocks_of(t->level[l].w, t->level[l].h, t->gs.PSM);
+    }
+    t->texel_blocks = at;
     t->blocks = t->texel_blocks +
                 (t->clut_colors == 0 ? 0 : t->clut_colors == 16 ? blocks_of(8, 2, GS_PSM_CT32) : blocks_of(16, 16, GS_PSM_CT32));
 }
@@ -968,8 +996,15 @@ bool place(Held &r, Texture *t)
                                            [](const Texture *a, const Texture *b) { return a->block < b->block; }),
                           t);
     }
-    /* the texels, then the CLUT after them */
-    transfer(r, static_cast<uint32_t>(at), t->gs.TBW, t->gs.PSM, t->gs.Width, t->gs.Height, t->gs.Mem);
+    /* the texels, each level's, then the CLUT after them */
+    for (uint32_t l = 0; l < t->levels; l++) {
+        const Texture::Level &v = t->level[l];
+
+        transfer(r, static_cast<uint32_t>(at) + v.at, v.tbw, t->gs.PSM, v.w, v.h, v.mem);
+        if (l > 0) {
+            r.sent_bytes += v.w * v.h * texel_bits(t->gs.PSM) / 8;
+        }
+    }
     if (t->clut_colors != 0) {
         bool sixteen = t->clut_colors == 16;
 
@@ -990,9 +1025,11 @@ bool place(Held &r, Texture *t)
  * function where it isn't -1 */
 void apply(Held &r, const Draw &d)
 {
-    uint64_t values[8], names[8];
+    uint64_t values[12], names[12];
     int count = 0;
     uint64_t tex0 = r.tex0, tex1, clamp, alpha, test, zbuf, dthe;
+    uint64_t miptbp1 = r.miptbp1, miptbp2 = r.miptbp2;
+    bool mip = false;
 
     if (d.texture != nullptr) {
         Texture *t = const_cast<Texture *>(d.texture);
@@ -1016,8 +1053,26 @@ void apply(Held &r, const Draw &d)
 
         tex0 = GS_SETREG_TEX0(block, t->gs.TBW, t->gs.PSM, t->tw, t->th, d.alpha ? 1 : 0, tfx,
                               clut ? block + t->texel_blocks : 0, 0, 0, 0, clut ? 1 : 0);
+        /* the levels past the first, three to each of MIPTBP1 and 2 */
+        mip = d.mip && t->levels > 1;
+        if (mip) {
+            uint64_t words[2] = {0, 0};
+
+            for (uint32_t l = 1; l < t->levels; l++) {
+                const Texture::Level &v = t->level[l];
+                uint64_t place = static_cast<uint64_t>(block + v.at) | static_cast<uint64_t>(v.tbw) << 14;
+
+                words[(l - 1) / 3] |= place << (20 * ((l - 1) % 3));
+            }
+            miptbp1 = words[0];
+            miptbp2 = words[1];
+        }
     }
-    tex1 = GS_SETREG_TEX1(0, 0, d.linear ? 1 : 0, d.linear ? 1 : 0, 0, 0, 0);
+    /* mipmapped, the GS's level is log2 of the depth, plus K: the nearest
+     * level, filtered as the draw's are */
+    tex1 = mip ? GS_SETREG_TEX1(0, d.texture->levels - 1, d.linear ? 1 : 0, d.linear ? 4 : 2, 0, 0,
+                                static_cast<uint64_t>(static_cast<uint16_t>(d.k) & 0xfffU))
+               : GS_SETREG_TEX1(0, 0, d.linear ? 1 : 0, d.linear ? 1 : 0, 0, 0, 0);
     clamp = GS_SETREG_CLAMP(d.clamp_u ? 1 : 0, d.clamp_v ? 1 : 0, 0, 0, 0, 0);
     alpha = blend_of(d.src, d.dst);
     /* a blend by the source's alpha over what lies behind rewrites every
@@ -1037,6 +1092,14 @@ void apply(Held &r, const Draw &d)
      * the screen is 32-bit (show_buffer) */
     dthe = 0;
     zbuf = GS_SETREG_ZBUF(r.gs->ZBuffer / 8192, r.gs->PSMZ, d.depth_write && !d.blend ? 0 : 1);
+    if (mip && (!r.sent || miptbp1 != r.miptbp1 || miptbp2 != r.miptbp2)) {
+        values[count] = miptbp1;
+        names[count++] = GS_MIPTBP1_REG;
+        values[count] = miptbp2;
+        names[count++] = GS_MIPTBP2_REG;
+        r.miptbp1 = miptbp1;
+        r.miptbp2 = miptbp2;
+    }
     if (d.texture != nullptr && (!r.sent || tex0 != r.tex0)) {
         values[count] = 0;
         names[count++] = GS_TEXFLUSH;
@@ -1069,7 +1132,11 @@ void apply(Held &r, const Draw &d)
         names[count++] = GS_DTHE;
         r.dthe = dthe;
     }
-    send_registers(r, values, names, count);
+    /* an A+D packet takes 8 at most */
+    send_registers(r, values, names, std::min(count, 8));
+    if (count > 8) {
+        send_registers(r, values + 8, names + 8, count - 8);
+    }
     r.tex0 = tex0;
     r.tex1 = tex1;
     r.clamp = clamp;
@@ -2097,6 +2164,16 @@ Draw draw_of(Held &r, const psp_state &s)
     d.cull = s.cull;
     d.offset = s.offset != 0;
     d.fog = s.fog & 3;
+    /* the level at a depth of 1: log2 of the texels a pixel spans there,
+     * the density's texels to a unit of view space over the focal length's
+     * pixels. the GS's level adds log2 of the depth */
+    if (d.texture != nullptr && d.texture->levels > 1 && s.density > 0.0F && r.place.screen[0] > 0.0F) {
+        float texels = s.density * sqrtf(static_cast<float>(d.texture->width) * d.texture->height) / 255.0F;
+        float k = log2f(texels / r.place.screen[0]) * 16.0F;
+
+        d.mip = true;
+        d.k = static_cast<int16_t>(k < -2048.0F ? -2048 : k > 2047.0F ? 2047 : lroundf(k));
+    }
     return d;
 }
 
@@ -2525,6 +2602,19 @@ uint32_t add_picture(Held &r, const ps2::Lent &lent)
     made->clut_colors = lent.clut_colors;
     made->lender = lent.lender;
     made->fixed = lent.fixed;
+    /* its mip levels, one after another past the texels */
+    made->levels = std::max<uint32_t>(1, std::min<uint32_t>(lent.levels, ps2::LEVELS_MOST));
+    {
+        const uint8_t *at = static_cast<const uint8_t *>(lent.texels);
+        uint32_t w = lent.side_w, h = lent.side_h;
+
+        for (uint32_t l = 0; l < made->levels; l++) {
+            made->level[l] = {at, w, h, tbw_of(w, lent.psm), 0};
+            at += lent.level_bytes[l];
+            w /= 2;
+            h /= 2;
+        }
+    }
     size_texture(made);
     r.texture_bytes += lent.side_w * lent.side_h * texel_bits(lent.psm) / 8;
     return keep_texture(r, made);

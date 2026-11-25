@@ -108,6 +108,23 @@ memory every frame by DMA.
    with the walk.
 4. **Mipmaps** (`TEXTURES.md` stage 5), whose levels stream with their
    textures.
+
+   **Done.** A texture's levels lie after its texels in the ring, and go
+   up with them; `MIPTBP1` and `MIPTBP2` go with its TEX0. The GS picks a
+   level by depth alone (log2 of 1/Q, plus TEX1's K), not by how densely
+   a surface maps its texture. So each meshset's density, the root of its
+   UV area over its area, is measured once and kept by its address
+   (`walk_density`), and `draw_of` turns it into K for that draw:
+   log2(texels per view unit over the focal length). Draws with no
+   density (2D, the screen's own pixels, env maps) draw the top level
+   only.
+
+   At the start of Emerald Coast a picture uploads about 1.3 MB (136
+   textures) against 0.9 MB (115) without mipmaps, and the EE takes about
+   71 ms against 66 ms. Distant ground no longer shimmers. K takes a
+   surface as seen head on, so a floor at a grazing angle picks a level
+   sharper than the Dreamcast's would; a bias is the knob if it
+   shimmers.
 5. **480i field rendering**, if the texture room is still short there.
 
 ## What carries over

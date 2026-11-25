@@ -98,6 +98,10 @@ struct Made {
     uint32_t colors = 0;
     double psnr = INFINITY;
     int most = 0; /* the largest difference of a channel */
+    /* the mip levels past the first, the largest first, as the GS takes
+     * them, and each one's TBW */
+    std::vector<std::vector<uint8_t>> levels;
+    std::vector<uint32_t> level_tbw;
 };
 
 uint32_t rgba_at(const pc::Image &image, uint32_t x, uint32_t y)
@@ -259,6 +263,57 @@ std::vector<uint32_t> fit(const std::vector<std::pair<uint32_t, uint32_t>> &colo
     return means;
 }
 
+/* the PVR's layouts that carry mip levels: the GS's mipmapping stands in
+ * for them */
+bool has_mips(uint8_t layout)
+{
+    return layout == 0x02 || layout == 0x04 || layout == 0x11 || layout == 0x12;
+}
+
+/* a TBW for a level of w texels' width in psm */
+uint32_t tbw_for(uint8_t psm, uint32_t w)
+{
+    uint32_t tbw = (w + 63) / 64;
+
+    if (psm == ps2::GS_PSM_8 || psm == ps2::GS_PSM_4) {
+        tbw = std::max<uint32_t>(2, (tbw + 1) & ~1U);
+    }
+    return tbw;
+}
+
+/* the level below rgba, of w by h: each texel the mean of four, its color
+ * weighted by their alpha so a clear texel's color darkens no edge */
+std::vector<uint32_t> half_of(const std::vector<uint32_t> &rgba, uint32_t w, uint32_t h)
+{
+    uint32_t hw = w / 2, hh = h / 2;
+    std::vector<uint32_t> out(static_cast<size_t>(hw) * hh);
+
+    for (uint32_t y = 0; y < hh; y++) {
+        for (uint32_t x = 0; x < hw; x++) {
+            uint32_t four[4] = {rgba[(2 * y) * w + 2 * x], rgba[(2 * y) * w + 2 * x + 1],
+                                rgba[(2 * y + 1) * w + 2 * x], rgba[(2 * y + 1) * w + 2 * x + 1]};
+            double sum[3] = {0, 0, 0}, plain[3] = {0, 0, 0}, alpha = 0.0;
+
+            for (uint32_t c : four) {
+                double a = channel(c, 3);
+
+                for (int k = 0; k < 3; k++) {
+                    sum[k] += channel(c, k) * a;
+                    plain[k] += channel(c, k);
+                }
+                alpha += a;
+            }
+            uint32_t mean = static_cast<uint32_t>(lround(alpha / 4.0)) << 24;
+
+            for (int k = 0; k < 3; k++) {
+                mean |= static_cast<uint32_t>(lround(alpha > 0.0 ? sum[k] / alpha : plain[k] / 4.0)) << (8 * k);
+            }
+            out[static_cast<size_t>(y) * hw + x] = mean;
+        }
+    }
+    return out;
+}
+
 /* the TEX0 of a picture at address 0, its CLUT at 0 */
 uint64_t tex0_of(uint8_t psm, uint32_t w, uint32_t h, bool clut)
 {
@@ -398,6 +453,79 @@ Made make(const Source &s)
     made.head.width = static_cast<uint16_t>(pw);
     made.head.height = static_cast<uint16_t>(ph);
     made.head.mipmaps = 1;
+    /* the mip levels, where the PVR had them: each made from the one above,
+     * at the top's format, a CLUT's indices to its nearest entries, down to
+     * sides of 8, or 16 wide at 4 bits, which the GS's transfers take whole */
+    if (has_mips(s.layout)) {
+        uint8_t psm = static_cast<uint8_t>(made.head.tex0 >> 20 & 0x3f);
+        std::vector<uint32_t> level(static_cast<size_t>(pw) * ph);
+        std::unordered_map<uint32_t, uint8_t> nearest;
+        uint32_t lw = pw, lh = ph;
+
+        for (uint32_t y = 0; y < ph; y++) {
+            for (uint32_t x = 0; x < pw; x++) {
+                level[static_cast<size_t>(y) * pw + x] = rgba_at(image, x, y);
+            }
+        }
+        while (made.levels.size() + 1 < ps2::LEVELS_MOST && lw / 2 >= (psm == ps2::GS_PSM_4 ? 16U : 8U) &&
+               lh / 2 >= 8) {
+            level = half_of(level, lw, lh);
+            lw /= 2;
+            lh /= 2;
+            std::vector<uint8_t> bytes;
+
+            if (!palette.empty()) {
+                bytes.assign(psm == ps2::GS_PSM_4 ? level.size() / 2 : level.size(), 0);
+                for (size_t at = 0; at < level.size(); at++) {
+                    auto found = nearest.find(level[at]);
+                    uint8_t i;
+
+                    if (found != nearest.end()) {
+                        i = found->second;
+                    } else {
+                        size_t best = 0;
+                        int best_d = INT32_MAX;
+
+                        for (size_t q = 0; q < palette.size(); q++) {
+                            int d = distance(level[at], palette[q]);
+
+                            if (d < best_d) {
+                                best_d = d;
+                                best = q;
+                            }
+                        }
+                        i = static_cast<uint8_t>(best);
+                        nearest[level[at]] = i;
+                    }
+                    if (psm == ps2::GS_PSM_4) {
+                        bytes[at / 2] |= static_cast<uint8_t>(i << (4 * (at & 1)));
+                    } else {
+                        bytes[at] = i;
+                    }
+                }
+            } else if (psm == ps2::GS_PSM_32) {
+                bytes.resize(level.size() * 4);
+                for (size_t at = 0; at < level.size(); at++) {
+                    uint32_t c = gs_color(level[at]);
+
+                    memcpy(&bytes[at * 4], &c, 4);
+                }
+            } else {
+                bytes.resize(level.size() * 2);
+                for (size_t at = 0; at < level.size(); at++) {
+                    uint32_t c = level[at];
+                    uint16_t half = static_cast<uint16_t>(channel(c, 0) >> 3 | (channel(c, 1) >> 3) << 5 |
+                                                          (channel(c, 2) >> 3) << 10 |
+                                                          (channel(c, 3) >= 0x80 ? 0x8000 : 0));
+
+                    memcpy(&bytes[at * 2], &half, 2);
+                }
+            }
+            made.levels.push_back(bytes);
+            made.level_tbw.push_back(tbw_for(psm, lw));
+        }
+        made.head.mipmaps = static_cast<uint8_t>(1 + made.levels.size());
+    }
     return made;
 }
 
@@ -414,11 +542,27 @@ std::vector<uint8_t> tim2_of(const std::vector<Source> &sources, const std::vect
         ps2::Tim2Picture p = made[i].head;
         std::string comment = s.name;
         uint32_t extended = static_cast<uint32_t>(sizeof(ps2::Tim2Extended) + sizeof(ps2::Tim2Terms) + comment.size() + 1);
-        uint32_t head_bytes = static_cast<uint32_t>(sizeof p) + extended;
+        uint32_t head_bytes = ps2::extended_at(p.mipmaps) + extended;
+        auto aligned = [](size_t n) {
+            return static_cast<uint32_t>((n + ps2::TIM2_ALIGN - 1) & ~static_cast<size_t>(ps2::TIM2_ALIGN - 1));
+        };
+        ps2::Tim2Mips mips{};
 
         head_bytes = (head_bytes + ps2::TIM2_ALIGN - 1) & ~(ps2::TIM2_ALIGN - 1);
         p.head_bytes = static_cast<uint16_t>(head_bytes);
-        p.image_bytes = static_cast<uint32_t>((made[i].texels.size() + ps2::TIM2_ALIGN - 1) & ~(ps2::TIM2_ALIGN - 1));
+        p.image_bytes = aligned(made[i].texels.size());
+        mips.sizes[0] = p.image_bytes;
+        for (size_t l = 0; l < made[i].levels.size(); l++) {
+            uint64_t tbw = made[i].level_tbw[l];
+
+            mips.sizes[l + 1] = aligned(made[i].levels[l].size());
+            p.image_bytes += mips.sizes[l + 1];
+            if (l < 3) {
+                mips.miptbp1 |= tbw << (14 + 20 * l);
+            } else {
+                mips.miptbp2 |= tbw << (14 + 20 * (l - 3));
+            }
+        }
         p.clut_bytes = static_cast<uint32_t>((made[i].clut.size() + ps2::TIM2_ALIGN - 1) & ~(ps2::TIM2_ALIGN - 1));
         p.total = p.head_bytes + p.image_bytes + p.clut_bytes;
         ps2::Tim2Extended ext = {{'e', 'X', 't', 0}, extended, sizeof(ps2::Tim2Terms), 0};
@@ -426,12 +570,19 @@ std::vector<uint8_t> tim2_of(const std::vector<Source> &sources, const std::vect
                                 static_cast<uint16_t>(s.image.width), static_cast<uint16_t>(s.image.height), 0};
 
         put(out, &p, sizeof p);
+        if (p.mipmaps > 1) {
+            put(out, &mips, sizeof mips);
+        }
         put(out, &ext, sizeof ext);
         put(out, &terms, sizeof terms);
         put(out, comment.c_str(), comment.size() + 1);
         pad(out, ps2::TIM2_ALIGN);
         put(out, made[i].texels.data(), made[i].texels.size());
         pad(out, ps2::TIM2_ALIGN);
+        for (const std::vector<uint8_t> &level : made[i].levels) {
+            put(out, level.data(), level.size());
+            pad(out, ps2::TIM2_ALIGN);
+        }
         put(out, made[i].clut.data(), made[i].clut.size());
         pad(out, ps2::TIM2_ALIGN);
     }
@@ -551,14 +702,14 @@ int main(int argc, char **argv)
     }
     FILE *report = fopen("report.csv.new", "w");
     std::map<std::string, uint32_t> kinds;
-    uint32_t pictures = 0, written = 0, wrong = 0;
+    uint32_t pictures = 0, written = 0, wrong = 0, mipped = 0;
     uint64_t total = 0;
     double worst = INFINITY;
 
     if (report == nullptr) {
         return 1;
     }
-    fprintf(report, "file,picture,global_index,name,source,pixel,layout,width,height,kind,colors,psnr,most,bytes\n");
+    fprintf(report, "file,picture,global_index,name,source,pixel,layout,width,height,kind,colors,psnr,most,bytes,levels\n");
     for (const auto &[name, sources] : names) {
         std::vector<Made> made;
 
@@ -574,7 +725,8 @@ int main(int argc, char **argv)
                 /* the fit is too far: 16 or 32 bits */
                 Source plain_source = s;
 
-                plain_source.layout = 0;
+                /* still mipmapped where it was, but not VQ */
+                plain_source.layout = has_mips(s.layout) ? 0x02 : 0;
                 m = make(plain_source);
                 allowed = strcmp(m.kind, "16-bit") == 0 ? 7 : 1;
                 whole = true;
@@ -589,10 +741,17 @@ int main(int argc, char **argv)
             }
             kinds[m.kind]++;
             pictures++;
-            total += m.texels.size() + m.clut.size();
-            fprintf(report, "%s,%zu,%u,%s,%s,%u,%u,%u,%u,%s,%u,%.2f,%d,%zu\n", name.c_str(), i, s.global_index,
+            size_t bytes = m.texels.size() + m.clut.size();
+
+            for (const std::vector<uint8_t> &level : m.levels) {
+                bytes += level.size();
+            }
+            total += bytes;
+            mipped += m.levels.empty() ? 0 : 1;
+            fprintf(report, "%s,%zu,%u,%s,%s,%u,%u,%u,%u,%s,%u,%.2f,%d,%zu,%u\n", name.c_str(), i, s.global_index,
                     s.name.c_str(), s.path.c_str(), s.pixel, s.layout, s.image.width, s.image.height, m.kind,
-                    m.colors, std::isinf(m.psnr) ? 999.0 : m.psnr, m.most, m.texels.size() + m.clut.size());
+                    m.colors, std::isinf(m.psnr) ? 999.0 : m.psnr, m.most, bytes,
+                    static_cast<unsigned>(m.head.mipmaps));
             made.push_back(std::move(m));
         }
         bool changed = false;
@@ -627,7 +786,7 @@ int main(int argc, char **argv)
     for (const auto &[kind, n] : kinds) {
         printf(" %s %u,", kind.c_str(), n);
     }
-    printf(" the farthest fit %.1f dB\n", std::isinf(worst) ? 999.0 : worst);
+    printf(" %u mipmapped, the farthest fit %.1f dB\n", mipped, std::isinf(worst) ? 999.0 : worst);
     if (wrong != 0) {
         fprintf(stderr, "textures_tm2: %u pictures differ from their images past their format's loss\n", wrong);
         return 1;

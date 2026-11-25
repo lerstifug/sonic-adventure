@@ -319,6 +319,11 @@ static int models_draw(const NJS_MODEL *model, uint8_t mode, const struct draw_s
             .fog = (uint8_t)((state->tsp & TSP_FOG) >> TSP_FOG_SHIFT),
             .flip_u = (material->flags & SA_MAT_FLIP_U) != 0,
             .flip_v = (material->flags & SA_MAT_FLIP_V) != 0,
+            /* the texels' density in view space picks the mip level by
+             * depth (walk_density); an env map's u and v follow no surface */
+            .density = (material->flags & SA_MAT_TEXTURE) && !(material->flags & SA_MAT_ENV) && longest > 0.0F
+                           ? walk_density(model, set) / sqrtf(longest)
+                           : 0.0F,
         };
         const Sint16 *at = set->meshes;
         float *out = NULL;
