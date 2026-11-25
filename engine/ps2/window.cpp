@@ -15,6 +15,9 @@ extern "C" {
 #include "draw.h"
 #include "window.h"
 
+/* the run's vsyncs, as the log tells them (engine/native/native.h) */
+extern "C" unsigned long native_vsyncs;
+
 namespace pc {
 
 namespace {
@@ -140,15 +143,29 @@ sa_result window_pad(Window *window, uint32_t port, sa_pad &pad)
     }
     int state = padGetState(static_cast<int>(port), 0);
 
-    /* a pad plugged in settles over some reads first: till then, and with
-     * none there, the port holds nothing */
-    if (state != PAD_STATE_STABLE && state != PAD_STATE_FINDCTP1) {
+    /* the log's word of each change of a port's state, the first few */
+    {
+        static int last[PORTS] = {-1, -1}, said;
+
+        if (state != last[port] && said < 40) {
+            fprintf(stderr, "sa1: pad %u is in state %d, at vsync %lu\n", static_cast<unsigned>(port + 1), state,
+                    native_vsyncs);
+            last[port] = state;
+            said++;
+        }
+    }
+    /* with no pad there, the port holds nothing, and the next pad plugged
+     * in is asked for its sticks again. a pad busy with a command, as the
+     * sticks' own turns it for a few reads, still holds its buttons: those
+     * reads went empty before, and the record kept the last press, so each
+     * press counted twice */
+    if (state == PAD_STATE_DISCONN) {
         window->asked[port] = false;
         window->held[port] = 0;
         return SA_EMPTY;
     }
-    /* a DualShock starts with its sticks off: they're turned on, and kept
-     * on against its analog button */
+    /* a DualShock starts with its sticks off: they're turned on once, and
+     * kept on against its analog button */
     if (!window->asked[port] && state == PAD_STATE_STABLE) {
         window->asked[port] = true;
         if (padInfoMode(static_cast<int>(port), 0, PAD_MODETABLE, -1) > 0) {

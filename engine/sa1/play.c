@@ -654,6 +654,11 @@ static void read_pad(void *record)
         pad->y2 = sample.y2;
         pad->r = sample.r;
         pad->l = sample.l;
+    } else {
+        /* no read: the buttons stay held, but no press or release is new,
+         * so the last read's press isn't the game's twice */
+        pad->press = 0;
+        pad->release = 0;
     }
     native_fpu_game(game);
 }
