@@ -60,6 +60,36 @@ memory every frame by DMA.
 
    The HUD keeps its fixed area outside the ring. Measured by bytes
    uploaded a picture, and by the GS's time for them.
+
+   **Done.** Opaque draws record their VIF bytes into a staging buffer, and
+   the picture's stream refers to them by REF tags, so nothing is copied.
+   At the blends they go sorted by palette, texture, then state; a draw's
+   offset pass sorts right behind it. Textures go into a ring below the
+   fixed area. `sort 0` in the settings draws at once, for comparison.
+
+   At the start of Emerald Coast, per picture:
+
+   | | Stage 1 | Stage 2 |
+   |---|---|---|
+   | Textures uploaded | ~820 | ~113 |
+   | Bytes uploaded | ~10.4 MB | ~0.89 MB |
+   | EE time | ~83 ms | ~74 ms |
+   | Heap at its most | 10.4 MB | 8.5 MB |
+
+   What was learned:
+   - **The ring did the work.** The old LRU picked among textures all used
+     in the same picture, so it put out ones about to be used again. A
+     picture binds about 124 distinct textures, and now sends each once,
+     which is the floor for a 0.5 MB room. Sorting alone changes little
+     here; it pays off with the VU1 path's palettes.
+   - **The EE's heap is short.** The heap has about 13.4 MB above the
+     program, and the game's loads take most of it. 2.6 MB of staging made
+     the game's file reads stall at loads. The stream is now 2 × 128 KB,
+     since the staging holds the bulk; the staging is 2 × 384 KB, and a
+     picture that outgrows it sends its sorted draws early and draws the
+     rest at once.
+   - **The EE's time goes elsewhere:** the walk and the blends' triangles
+     on the EE, which the VU1 path (stage 3) takes over.
 3. **Textures on the VU1 path** (renderer stage 3 of the models' path):
    UVs, ST and Q from `model.vsm`, and highlights from the palette's offsets.
    It fits the draw list as one more kind of draw.

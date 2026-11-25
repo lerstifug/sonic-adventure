@@ -76,6 +76,9 @@ int ps2_models = 0;
 /* textures pak takes the textures from the pack, as before the TIM2 files
  * (engine/ps2/textures.cpp) */
 int ps2_textures_pak = 0;
+/* sort 0 draws each opaque draw as it comes, where by default a picture's
+ * wait to go sorted by palette and texture (engine/ps2/RENDERER.md) */
+int ps2_sort = 1;
 /* the sampling profiler's (engine/ps2/profile.c) */
 static int sampling;
 void ps2_profile_start(void);
@@ -246,6 +249,10 @@ static int take_target(const char *name, const char *value)
     }
     if (!strcmp(name, "textures")) {
         ps2_textures_pak = !strcmp(value, "pak");
+        return 1;
+    }
+    if (!strcmp(name, "sort")) {
+        ps2_sort = atoi(value);
         return 1;
     }
     /* sample 1: the sampling profiler (profile.c) */

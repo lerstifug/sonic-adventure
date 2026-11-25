@@ -83,6 +83,9 @@ extern "C" int ps2_dither;
 extern "C" int ps2_profile;
 /* whether opaque strips go to VU1 (engine/ps2/main.c's vu) */
 extern "C" int ps2_vu;
+/* whether a picture's opaque draws wait to go sorted by palette and texture
+ * (engine/ps2/main.c's sort, RENDERER.md's stage 2) */
+extern "C" int ps2_sort;
 
 static inline uint32_t stamp()
 {
@@ -126,8 +129,18 @@ constexpr float NEAR_Z = 1.0F;
 constexpr float REACH = 5.0F;
 constexpr float DEPTH_MOST = 16777215.0F; /* the 24-bit depth buffer's most */
 /* the qwords of each of VIF1's two streams, a picture's commands: a
- * picture that fills one sends it and goes on in the other */
-constexpr uint32_t STREAM_QWORDS = 3U << 15;
+ * picture that fills one sends it and goes on in the other. the deferred
+ * draws' bytes lie in the stagings, which the stream refers to, so a
+ * stream need only hold the largest single write, a packet of 3072
+ * corners'. the EE's heap is short: the game's loads take the most of it */
+constexpr uint32_t STREAM_QWORDS = 1U << 13;
+/* the qwords of each of the two stagings of the deferred draws: a picture
+ * that fills one sends its deferred draws and draws the rest at once */
+constexpr uint32_t STAGING_QWORDS = 3U << 13;
+/* the palettes a picture keeps for its deferred draws, at most, and a
+ * draw's of none */
+constexpr uint32_t PALETTES_MOST = 16;
+constexpr uint32_t NO_PALETTE = UINT32_MAX;
 /* the words a stream keeps spare past any write, for its last tags */
 constexpr uint32_t STREAM_SPARE = 64;
 /* the most qwords of a DMA tag's, of a DIRECT's and of a GIF tag's loops */
@@ -320,6 +333,54 @@ struct Held {
     uint32_t writing = 0, at = 0;
     int32_t tag = -1, direct = -1;
     bool vu_since = false;
+    /* where the EE writes now, its room in words, and whether it's the
+     * stream, a DMA chain, or the staging of the deferred draws, VIF1's
+     * codes alone, which the stream's REF tags send (RENDERER.md). the one
+     * the EE doesn't write lies parked, as its words, at, room, tag, DIRECT
+     * and VU1's work: swap_out trades the two */
+    uint32_t *out_words = nullptr;
+    uint32_t out_cap = 0;
+    bool chain = true;
+    struct Parked {
+        uint32_t *words = nullptr;
+        uint32_t at = 0, cap = 0;
+        int32_t tag = -1, direct = -1;
+        bool vu_since = true, chain = false;
+    } parked;
+    /* the deferred draws: two stagings, a picture's each in turn, so one
+     * the last picture's stream still sends stays whole; whether the open
+     * picture defers its opaque draws; and their records, in the order
+     * they came */
+    uint32_t *staging[2] = {nullptr, nullptr};
+    bool defer = false, recording = false;
+    struct Deferred {
+        Draw d;
+        uint32_t palette; /* the picture's palette it lights by, or NO_PALETTE */
+        uint32_t first, end; /* its words in the staging */
+        bool vu_end; /* its last work is VU1's */
+        uint32_t order;
+        uint32_t key; /* state_key's of d */
+        /* the texture it sorts by, and 1 for a draw's offset pass, which
+         * sorts by its first pass's keys, right after it */
+        const Texture *by;
+        uint32_t second;
+    };
+    std::vector<Deferred> deferred;
+    /* the picture's palettes, by their keys, as VU1 takes them, two
+     * pictures' rooms in turn; the one the open draw lights by */
+    float *palette_room[2] = {nullptr, nullptr};
+    std::vector<uint32_t> palette_keys;
+    uint32_t palette_now = UINT32_MAX;
+    /* textures dropped while a deferred draw holds them: they go once the
+     * draws are sent */
+    std::vector<Texture *> doomed;
+    /* the texture room's ring: where the next texture goes */
+    uint32_t ring_at = 0, ring_wraps = 0;
+    uint32_t deferred_most = 0, flushed_early = 0;
+    /* textures bound in a picture, once each, and the sends before its blends */
+    uint32_t distinct = 0, opaque_sends = 0, staging_most = 0;
+    /* the last draw begun waits in the list, for its offset pass to follow */
+    bool base_deferred = false;
     /* whether the picture sent VU1 its fog table */
     bool vu_fog = false;
     /* the open model batch's head's first word and its corners' UNPACK's,
@@ -424,7 +485,21 @@ uint32_t vif_code(uint32_t command, uint32_t num, uint32_t immediate)
 
 uint32_t *words(Held &r)
 {
-    return r.stream[r.writing];
+    return r.out_words;
+}
+
+/* the EE writes the parked output, and parks the one it wrote */
+void swap_out(Held &r)
+{
+    Held::Parked &p = r.parked;
+
+    std::swap(r.out_words, p.words);
+    std::swap(r.at, p.at);
+    std::swap(r.out_cap, p.cap);
+    std::swap(r.tag, p.tag);
+    std::swap(r.direct, p.direct);
+    std::swap(r.vu_since, p.vu_since);
+    std::swap(r.chain, p.chain);
 }
 
 void put(Held &r, uint32_t word)
@@ -490,6 +565,11 @@ void send_stream(Held &r, bool last);
  * at once, and a tag that would pass its most closes */
 void room(Held &r, uint32_t count)
 {
+    /* the staging has no tags, and each draw saw its room at its start
+     * (begin_draw) */
+    if (!r.chain) {
+        return;
+    }
     if (r.at + count + STREAM_SPARE > STREAM_QWORDS * 4) {
         send_stream(r, false);
     }
@@ -607,6 +687,7 @@ void send_stream(Held &r, bool last)
     *D1_TADR = physical(words(r));
     *D1_CHCR = 0x105; /* from memory, a chain, no tags to VIF1 */
     r.writing ^= 1;
+    r.out_words = r.stream[r.writing];
     r.at = 0;
     r.tag = -1;
     r.direct = -1;
@@ -753,24 +834,6 @@ void size_texture(Texture *t)
                 (t->clut_colors == 0 ? 0 : t->clut_colors == 16 ? blocks_of(8, 2, GS_PSM_CT32) : blocks_of(16, 16, GS_PSM_CT32));
 }
 
-/* the first place that holds blocks at align below the fixed textures'
- * room, or -1 */
-int32_t find_room(const Held &r, uint32_t blocks, uint32_t align)
-{
-    uint32_t at = r.vram_first;
-
-    for (const Texture *t : r.resident) {
-        uint32_t start = (at + align - 1) & ~(align - 1);
-
-        if (start + blocks <= static_cast<uint32_t>(t->block)) {
-            return static_cast<int32_t>(start);
-        }
-        at = std::max(at, static_cast<uint32_t>(t->block) + t->blocks);
-    }
-    at = (at + align - 1) & ~(align - 1);
-    return at + blocks <= r.fixed_low ? static_cast<int32_t>(at) : -1;
-}
-
 void unplace(Held &r, Texture *t)
 {
     if (t->block >= 0) {
@@ -819,6 +882,9 @@ int32_t place_fixed(Held &r, Texture *t)
 
 bool place(Held &r, Texture *t)
 {
+    if (t->used != r.pictures) {
+        r.distinct++;
+    }
     t->used = r.pictures;
     if (t->block >= 0) {
         return true;
@@ -832,20 +898,33 @@ bool place(Held &r, Texture *t)
             t->fixed = false;
         }
     }
+    /* the ring (RENDERER.md stage 2): the next room after the texture placed
+     * last, back at the bottom where the fixed textures' room comes. what
+     * lay there goes out: the GS drew with it before these texels come, and
+     * a sorted picture's draws of one texture run together, so what goes
+     * out is what was used longest ago */
     if (!t->fixed) {
-        while ((at = find_room(r, t->blocks, align)) < 0) {
-            Texture *oldest = nullptr;
+        uint32_t first = (r.vram_first + align - 1) & ~(align - 1);
 
-            for (Texture *o : r.resident) {
-                if (o != t && (oldest == nullptr || o->used < oldest->used)) {
-                    oldest = o;
-                }
-            }
-            if (oldest == nullptr) {
+        at = static_cast<int32_t>((r.ring_at + align - 1) & ~(align - 1));
+        if (static_cast<uint32_t>(at) + t->blocks > r.fixed_low) {
+            if (first + t->blocks > r.fixed_low) {
                 return false;
             }
-            unplace(r, oldest);
+            at = static_cast<int32_t>(first);
+            r.ring_wraps++;
         }
+        uint32_t end = static_cast<uint32_t>(at) + t->blocks;
+
+        for (size_t i = r.resident.size(); i-- > 0;) {
+            Texture *o = r.resident[i];
+
+            if (o != t && static_cast<uint32_t>(o->block) < end &&
+                static_cast<uint32_t>(o->block) + o->blocks > static_cast<uint32_t>(at)) {
+                unplace(r, o);
+            }
+        }
+        r.ring_at = end;
     }
     t->block = at;
     if (!t->fixed) {
@@ -961,6 +1040,175 @@ void apply(Held &r, const Draw &d)
     r.test = test;
     r.zbuf = zbuf;
     r.sent = true;
+}
+
+/* the deferred draws (RENDERER.md's stage 2). while a picture is open, an
+ * opaque draw sends neither its state nor its texture: its bytes, as VIF1
+ * takes them, go to the picture's staging, and a record keeps its state,
+ * the palette it lights by and where its bytes lie. at the picture's
+ * blends, flush_deferred sends the records sorted by palette, then
+ * texture, then the rest of their state: each one's state, its texture's
+ * texels among it where they need sending, then its bytes by a REF tag,
+ * as they lie. so a texture goes to the GS once for all its draws, just
+ * before them, and its room in the GS's memory serves the next texture
+ * after them. blends, and the screen's own pixels after them, draw at
+ * once, as before */
+void drop_now(Held &r, Texture *t);
+void send_palette(Held &r, uint32_t index);
+void flush_deferred(Held &r);
+
+/* a draw's state apart from its texture, for the sort */
+uint32_t state_key(const Draw &d)
+{
+    return static_cast<uint32_t>(d.decal) | d.alpha << 1 | d.clamp_u << 2 | d.clamp_v << 3 | d.linear << 4 |
+           d.cut << 5 | static_cast<uint32_t>(d.depth) << 6 | d.depth_write << 9 | d.offset << 10 |
+           static_cast<uint32_t>(d.fog) << 11;
+}
+
+/* a draw of at most words words of VIF1's begins: deferred, the EE writing
+ * the staging, where the picture defers its opaque draws and the staging
+ * has room; else at once, its state sent. palette says whether it lights
+ * by the picture's palette (ps2_vu_palette) */
+void begin_draw(Held &r, const Draw &d, uint32_t words_most, bool palette, bool second = false)
+{
+    /* a draw's offset pass is a blend, which draws at once unless its first
+     * pass waits in the list: then it waits right behind it */
+    bool follows = second && r.base_deferred && !r.deferred.empty();
+
+    if (!r.defer || !r.picture || (d.blend && !follows) || r.recording) {
+        r.base_deferred = false;
+        apply(r, d);
+        return;
+    }
+    if (r.parked.at + words_most + 64 > STAGING_QWORDS * 4) {
+        /* the staging is full: what it holds goes now, and the rest of
+         * the picture draws at once */
+        flush_deferred(r);
+        r.flushed_early++;
+        r.base_deferred = false;
+        apply(r, d);
+        return;
+    }
+    Held::Deferred rec = {d, palette ? r.palette_now : NO_PALETTE, 0, 0, false,
+                          static_cast<uint32_t>(r.deferred.size()), state_key(d), d.texture, 0};
+
+    if (follows) {
+        const Held::Deferred &base = r.deferred.back();
+
+        rec.palette = base.palette;
+        rec.order = base.order;
+        rec.key = base.key;
+        rec.by = base.by;
+        rec.second = 1;
+    }
+    swap_out(r);
+    /* the draw's first DIRECT waits for VU1's work before it, which the
+     * sort may make any */
+    r.vu_since = true;
+    r.recording = true;
+    r.base_deferred = !follows;
+    rec.first = rec.end = r.at;
+    r.deferred.push_back(rec);
+}
+
+void end_draw(Held &r)
+{
+    if (!r.recording) {
+        return;
+    }
+    close_direct(r);
+    while (r.at % 4 != 0) {
+        put(r, 0);
+    }
+    Held::Deferred &last = r.deferred.back();
+
+    last.end = r.at;
+    last.vu_end = r.vu_since;
+    if (last.end == last.first) {
+        r.deferred.pop_back();
+        r.base_deferred = false;
+    }
+    r.recording = false;
+    swap_out(r);
+}
+
+/* words of VIF1's from the EE's memory, by REF tags of the stream */
+void send_chunk(Held &r, const uint32_t *from, uint32_t count)
+{
+    for (uint32_t done = 0; done < count;) {
+        uint32_t n = std::min(count - done, TAG_MOST * 4);
+
+        room(r, 8);
+        close_tag(r);
+        uint32_t *t = words(r) + r.at;
+
+        t[0] = n / 4 | TAG_REF << 28;
+        t[1] = physical(from + done);
+        t[2] = t[3] = 0;
+        r.at += 4;
+        done += n;
+    }
+}
+
+/* the deferred draws to the stream, sorted, and the picture's draws at once
+ * after them */
+void flush_deferred(Held &r)
+{
+    r.staging_most = std::max(r.staging_most, r.parked.at * 4);
+    r.defer = false;
+    if (r.deferred.empty()) {
+        return;
+    }
+    std::vector<Held::Deferred> &list = r.deferred;
+
+    r.deferred_most = std::max(r.deferred_most, static_cast<uint32_t>(list.size()));
+    std::sort(list.begin(), list.end(), [](const Held::Deferred &a, const Held::Deferred &b) {
+        if (a.palette != b.palette) {
+            return a.palette < b.palette;
+        }
+        if (a.by != b.by) {
+            return reinterpret_cast<uintptr_t>(a.by) < reinterpret_cast<uintptr_t>(b.by);
+        }
+        if (a.key != b.key) {
+            return a.key < b.key;
+        }
+        return a.order != b.order ? a.order < b.order : a.second < b.second;
+    });
+    const uint32_t *staged = r.parked.words;
+    uint32_t sent_palette = NO_PALETTE;
+
+    for (const Held::Deferred &rec : list) {
+        if (rec.palette != NO_PALETTE && rec.palette != sent_palette) {
+            send_palette(r, rec.palette);
+            sent_palette = rec.palette;
+        }
+        apply(r, rec.d);
+        send_chunk(r, staged + rec.first, rec.end - rec.first);
+        r.vu_since = rec.vu_end;
+    }
+    list.clear();
+    for (Texture *t : r.doomed) {
+        drop_now(r, t);
+    }
+    r.doomed.clear();
+}
+
+/* the picture's palette of index to VU1's memory, once VU1's batches before
+ * are done: its table by a REF tag, from the picture's room of them */
+void send_palette(Held &r, uint32_t index)
+{
+    room(r, 16);
+    close_direct(r);
+    put(r, vif_code(VIF_FLUSHE, 0, 0));
+    while (r.at % 4 != 3) {
+        put(r, 0);
+    }
+    put(r, vif_code(UNPACK_V4_32, VU_PALETTE_ENTRIES & 0xff, VU_PALETTE));
+    send_chunk(r,
+               reinterpret_cast<const uint32_t *>(r.palette_room[r.pictures & 1] + index * VU_PALETTE_ENTRIES * 4),
+               VU_PALETTE_ENTRIES * 4);
+    r.vu_palette = r.palette_keys[index];
+    r.palettes_sent++;
 }
 
 /* a corner's color in the GS's terms: halved where a texture modulates it,
@@ -1085,8 +1333,11 @@ void send_packet(Held &r, const Draw &d, const Sent *pool, const uint32_t *index
     if (count == 0) {
         return;
     }
+    /* each corner takes a qword and a half at most, and each packet a few */
+    uint32_t words_most = (count * 2 + 16 * (count / (3 * 1024) + 1)) * 4;
+
     if (pass == 0) {
-        apply(r, d);
+        begin_draw(r, d, words_most, false);
     } else {
         /* the offset adds over the first pass's pixels, at their depth */
         Draw add = d;
@@ -1098,7 +1349,7 @@ void send_packet(Held &r, const Draw &d, const Sent *pool, const uint32_t *index
         add.depth = SA_DEPTH_GEQUAL;
         add.depth_write = false;
         add.cut = false;
-        apply(r, add);
+        begin_draw(r, add, words_most, false, true);
     }
     /* the GIF's REGLIST form: a register's 64 bits each, half PACKED's
      * room. RGBAQ carries the corner's 1/z, which the GS takes as STQ's Q,
@@ -1106,7 +1357,7 @@ void send_packet(Held &r, const Draw &d, const Sent *pool, const uint32_t *index
      * whole triangles, and its words an even count, so an odd one ends in
      * a word the GIF passes over */
     for (uint32_t first = 0; first < count;) {
-        uint32_t take = std::min<uint32_t>(count - first, 3 * 4096);
+        uint32_t take = std::min<uint32_t>(count - first, 3 * 1024);
         uint32_t words = take * static_cast<uint32_t>(regs);
         uint32_t qwords = (words + 1) / 2;
 
@@ -1156,6 +1407,7 @@ void send_packet(Held &r, const Draw &d, const Sent *pool, const uint32_t *index
         }
         first += take;
     }
+    end_draw(r);
 }
 
 /* whether a blend's corners carry an offset to add */
@@ -1353,6 +1605,10 @@ void draw_blends(Held &r)
     static uint32_t counts[DEPTH_KEYS];
     uint32_t n = static_cast<uint32_t>(b.size());
 
+    /* the opaque draws go first, sorted, and what draws after the blends'
+     * sort draws at once */
+    flush_deferred(r);
+    r.opaque_sends += r.sends - r.picture_sends;
     if (n == 0) {
         return;
     }
@@ -1554,10 +1810,20 @@ void open_screen(Held &r)
     r.kept = static_cast<psp_corner *>(memalign(64, KEPT_CORNERS * sizeof(psp_corner)));
     r.stream[0] = static_cast<uint32_t *>(memalign(64, STREAM_QWORDS * 16));
     r.stream[1] = static_cast<uint32_t *>(memalign(64, STREAM_QWORDS * 16));
+    r.out_words = r.stream[0];
+    r.out_cap = STREAM_QWORDS * 4;
+    r.chain = true;
+    for (int i = 0; i < 2; i++) {
+        r.staging[i] = static_cast<uint32_t *>(memalign(64, STAGING_QWORDS * 16));
+        r.palette_room[i] = static_cast<float *>(memalign(64, PALETTES_MOST * VU_PALETTE_ENTRIES * 16));
+    }
+    r.ring_at = r.vram_first;
     r.blends.reserve(BLENDS_MOST);
     r.blend_corners.reserve(3 * BLENDS_MOST);
-    r.opened = r.kept != nullptr && r.stream[0] != nullptr && r.stream[1] != nullptr;
+    r.opened = r.kept != nullptr && r.stream[0] != nullptr && r.stream[1] != nullptr && r.staging[0] != nullptr &&
+               r.staging[1] != nullptr && r.palette_room[0] != nullptr && r.palette_room[1] != nullptr;
     if (r.opened) {
+        r.out_words = r.stream[0];
         open_vu(r);
     }
     fprintf(stderr,
@@ -1612,6 +1878,17 @@ void read_fog(Held &r)
 void take_back(Held &r)
 {
     r.taken_back++;
+    if (r.recording) {
+        r.recording = false;
+        swap_out(r);
+    }
+    /* its deferred draws go unsent, and the textures they held go */
+    r.deferred.clear();
+    r.defer = false;
+    for (Texture *t : r.doomed) {
+        drop_now(r, t);
+    }
+    r.doomed.clear();
     r.at = 0;
     r.tag = -1;
     r.direct = -1;
@@ -1643,8 +1920,7 @@ void open_picture(Held &r)
         /* the alpha bits of a 16-bit texel, clear and solid, and the fog's
          * color, the PowerVR's ARGB as the GS's RGB */
         uint32_t c = r.fog.color;
-        /* and the draw buffer, as the frame: the copy to the display set
-         * it so too */
+        /* and the buffer the picture draws into, the one not showing */
         uint64_t values[3] = {static_cast<uint64_t>(0x80) << 32,
                               static_cast<uint64_t>(c >> 16 & 0xff) | (c >> 8 & 0xff) << 8 | (c & 0xff) << 16,
                               GS_SETREG_FRAME(r.gs->ScreenBuffer[r.draw_buffer & 1] / 8192, r.gs->Width / 64,
@@ -1669,6 +1945,15 @@ void open_picture(Held &r)
     r.blends.clear();
     r.blend_corners.clear();
     r.kept_used = 0;
+    /* the picture's opaque draws wait for its blends, in its staging and
+     * with its palettes, the room the picture before last used: its
+     * stream, which read them, was sent and has ended (send_stream waits
+     * for each stream before the next) */
+    r.defer = ps2_sort != 0;
+    r.deferred.clear();
+    r.parked = {r.staging[r.pictures & 1], 0, STAGING_QWORDS * 4, -1, -1, true, false};
+    r.palette_keys.clear();
+    r.palette_now = NO_PALETTE;
 }
 
 /* the copy of t mirrored past 1 as flip says, 1 for u, 2 for v, 3 for both:
@@ -1791,7 +2076,7 @@ bool send_strip(Held &r, const Draw &d, const Screen &s, const Corner *corners, 
     uint32_t words = count * static_cast<uint32_t>(regs);
     uint32_t qwords = (words + 1) / 2;
 
-    apply(r, d);
+    begin_draw(r, d, (qwords + 16) * 4, false);
     set_prim(r, GS_SETREG_PRIM(GS_PRIM_PRIM_TRISTRIP, 1, textured ? 1 : 0, fogged ? 1 : 0, 0, 0, 0, 0, 0));
     u64 *p = gif(r, qwords + 1);
 
@@ -1824,6 +2109,7 @@ bool send_strip(Held &r, const Draw &d, const Screen &s, const Corner *corners, 
     if (words % 2 != 0) {
         *p++ = 0;
     }
+    end_draw(r);
     return true;
 }
 
@@ -1933,10 +2219,12 @@ void send_vu(Held &r, const Draw &d, const Placed &placed, const psp_corner *cor
     uint64_t prim = GS_SETREG_PRIM(GS_PRIM_PRIM_TRISTRIP, 1, textured ? 1 : 0, fogged ? 1 : 0, 0, 0, 0, 0, 0);
     uint64_t regs = GS_ST | GS_RGBAQ << 4 | GS_XYZF2_REG << 8;
 
-    apply(r, d);
+    /* the fog table once a picture, to the stream, ahead of every deferred
+     * draw it serves */
     if (fogged && !r.vu_fog) {
         send_vu_fog(r);
     }
+    begin_draw(r, d, (count + 2 * (count / (VU_CORNERS - 2) + 1)) * 6 + 64 * (count / (VU_CORNERS - 2) + 1), false);
     for (uint32_t first = 0; first + 2 < count; first += VU_CORNERS - 2) {
         uint32_t n = std::min(count - first, VU_CORNERS);
         const psp_corner *c = corners + first;
@@ -2016,6 +2304,7 @@ void send_vu(Held &r, const Draw &d, const Placed &placed, const psp_corner *cor
             break;
         }
     }
+    end_draw(r);
 }
 
 /* a strip whose box lies wholly past a side draws nothing, and an opaque
@@ -2229,7 +2518,7 @@ uint32_t add_image(Held &r, const Image &image)
 
 /* a texture dropped: a stream unsent or sending may still send its texels,
  * so they're freed once it's sent, or its lender given back then */
-void drop_texture(Held &r, Texture *t)
+void drop_now(Held &r, Texture *t)
 {
     auto unsent = std::find(r.uploads.begin(), r.uploads.end(), t);
     bool sending = unsent != r.uploads.end() || (*D1_CHCR & CHCR_STR) != 0;
@@ -2251,6 +2540,17 @@ void drop_texture(Held &r, Texture *t)
         free(t->gs.Mem);
     }
     delete t;
+}
+
+/* a texture the game dropped goes now, or, while the picture's deferred
+ * draws may hold it, once they're sent (flush_deferred) */
+void drop_texture(Held &r, Texture *t)
+{
+    if (!r.deferred.empty() || r.recording) {
+        r.doomed.push_back(t);
+        return;
+    }
+    drop_now(r, t);
 }
 
 void free_texture(Held &r, uint32_t texture)
@@ -2442,14 +2742,19 @@ bool psp_submit(const PictureUniform &picture, uint32_t clear, const std::vector
                 "sa1: the GS's last %u pictures: %u triangles, %u us on the EE, %u of them the raster's "
                 "strips, %u its binds, which sent %u textures of %u KB, %u the walk's textures and %u its points' "
                 "light, and %u us on the GS each; %u of VU1's batches, %u triangles, %u strips dropped whole, "
-                "%u palettes sent; %u bytes of the heap in use, %u of them textures; %u pictures taken back\n",
+                "%u palettes sent; %u textures bound, %u sent before the blends; at most %u draws sorted in %u KB, %u lists sent early, %u wraps of the ring; %u bytes "
+                "of the heap in use, %u of them textures; %u pictures taken back\n",
                 static_cast<unsigned>(r.timed), static_cast<unsigned>(r.triangles / r.timed),
                 static_cast<unsigned>(r.make_us / r.timed), static_cast<unsigned>(r.strip_us / r.timed),
                 static_cast<unsigned>(r.bind_us / r.timed), static_cast<unsigned>(r.sends / r.timed), static_cast<unsigned>(r.sent_bytes / r.timed / 1024),
                 static_cast<unsigned>(ps2_walk_load_us / r.timed), static_cast<unsigned>(ps2_walk_light_us / r.timed),
                 static_cast<unsigned>(r.gs_us / r.timed), static_cast<unsigned>(r.vu_batches / r.timed),
                 static_cast<unsigned>(r.vu_triangles / r.timed), static_cast<unsigned>(r.strips_past / r.timed),
-                static_cast<unsigned>(r.palettes_sent / r.timed), static_cast<unsigned>(mallinfo().uordblks),
+                static_cast<unsigned>(r.palettes_sent / r.timed), static_cast<unsigned>(r.distinct / r.timed),
+                static_cast<unsigned>(r.opaque_sends / r.timed), static_cast<unsigned>(r.deferred_most),
+                static_cast<unsigned>(r.staging_most / 1024),
+                static_cast<unsigned>(r.flushed_early), static_cast<unsigned>(r.ring_wraps),
+                static_cast<unsigned>(mallinfo().uordblks),
                 static_cast<unsigned>(r.texture_bytes), static_cast<unsigned>(r.taken_back));
         r.taken_back = 0;
         ps2_walk_load_us = ps2_walk_light_us = 0;
@@ -2457,6 +2762,7 @@ bool psp_submit(const PictureUniform &picture, uint32_t clear, const std::vector
         r.sends = 0;
         r.sent_bytes = 0;
         r.vu_batches = r.vu_triangles = r.strips_past = r.palettes_sent = 0;
+        r.deferred_most = r.flushed_early = r.ring_wraps = r.distinct = r.opaque_sends = r.staging_most = 0;
         r.timed = r.triangles = 0;
         r.make_us = r.gs_us = r.strip_us = 0;
     }
@@ -2689,7 +2995,39 @@ extern "C" void ps2_vu_palette(uint32_t key, const uint32_t *colors, const uint3
 {
     pc::Held &r = held;
 
-    if (!r.picture || r.model_open || r.vu_palette == key) {
+    if (!r.picture || r.model_open) {
+        return;
+    }
+    /* while the picture defers its draws, the palette waits in its room for
+     * the sort, which sends it ahead of the draws that light by it */
+    if (r.defer) {
+        for (uint32_t i = 0; i < r.palette_keys.size(); i++) {
+            if (r.palette_keys[i] == key) {
+                r.palette_now = i;
+                return;
+            }
+        }
+        if (r.palette_keys.size() < pc::PALETTES_MOST) {
+            uint32_t index = static_cast<uint32_t>(r.palette_keys.size());
+            float *f = r.palette_room[r.pictures & 1] + index * pc::VU_PALETTE_ENTRIES * 4;
+
+            for (uint32_t e = 0; e < pc::VU_PALETTE_ENTRIES; e++) {
+                uint32_t color = colors[e * 2];
+
+                f[4 * e] = static_cast<float>(color & 0xffffffU);
+                f[4 * e + 1] = offsets != nullptr ? static_cast<float>(offsets[e * 2] & 0xffffffU) : 0.0F;
+                f[4 * e + 2] = static_cast<float>(color >> 24);
+                f[4 * e + 3] = 0.0F;
+            }
+            r.palette_keys.push_back(key);
+            r.palette_now = index;
+            return;
+        }
+        /* past the room's palettes: the deferred draws go now */
+        pc::flush_deferred(r);
+        r.flushed_early++;
+    }
+    if (r.vu_palette == key) {
         return;
     }
     /* VU1's batches before read the palette there: it goes after them */
@@ -2726,7 +3064,7 @@ extern "C" float *ps2_vu_open(const struct psp_state *state, const struct ps2_vu
     }
     pc::Draw d = pc::draw_of(r, *state);
 
-    pc::apply(r, d);
+    pc::begin_draw(r, d, 16 + pc::VU_MODEL_HEAD * 4 + 4 + PS2_VU_CORNERS * 8 + 8, true);
     pc::room(r, 8 + pc::VU_MODEL_HEAD * 4 + 4 + PS2_VU_CORNERS * 8 + 8);
     pc::close_direct(r);
     while (r.at % 4 != 3) {
@@ -2780,6 +3118,7 @@ extern "C" void ps2_vu_close(uint32_t count)
     if (count < 3 || count > PS2_VU_CORNERS) {
         /* the head's UNPACK goes too: the NOPs before it are VIF1's own */
         r.at = r.model_head - 1;
+        pc::end_draw(r);
         return;
     }
     uint32_t *w = pc::words(r);
@@ -2796,6 +3135,7 @@ extern "C" void ps2_vu_close(uint32_t count)
     r.triangles += count - 2;
     r.vu_triangles += count - 2;
     r.vu_batches++;
+    pc::end_draw(r);
 }
 
 extern "C" void psp_picture_drop(void)
