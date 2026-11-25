@@ -18,6 +18,10 @@
 #include "dsp.h"
 #include "sa_engine.h"
 #include "sa_pc.h"
+#if defined(SA_SMALL) && defined(_EE)
+/* the PS2's sound effects on the SPU2's own voices (engine/ps2/SOUND.md) */
+#include "sa1snd.h"
+#endif
 
 namespace pc {
 
@@ -82,6 +86,12 @@ struct Voice {
     uint32_t at, part;
     int32_t gain_left, gain_right;
     bool ramped;
+#endif
+#if defined(SA_SMALL) && defined(_EE)
+    /* the PS2's: the SPU2's voice that plays it, 1 and up, or 0 where the
+     * mixer does, and its pitch and volumes as last sent there */
+    uint8_t hw;
+    uint16_t sent_pitch, sent_left, sent_right;
 #endif
     Real step; /* samples a frame */
     int base, fine; /* the split's own note and its cents */
@@ -259,6 +269,38 @@ private:
     uint32_t reach_ = 0; /* the most a bank's end lay into sound memory */
     void voice_block(Voice &voice, int32_t *mix, uint32_t frames);
     void stream_block(Stream &stream, int32_t *mix, uint32_t frames);
+#endif
+#if defined(SA_SMALL) && defined(_EE)
+    /* the PS2's sound effects on the SPU2's own voices (engine/ps2/
+     * sound_spu.h): each programs bank's samples as VAG in the SPU2's
+     * memory, each in a region of its bank's, and a note whose sample is
+     * there played by a voice of the SPU2's, its envelope and LFO as its
+     * volume and pitch, sent once a render */
+    struct SpuSample {
+        uint32_t start, format, loop_start, loop_end;
+        bool loops;
+        uint32_t spu; /* its VAG's place in the SPU2's memory */
+    };
+    struct SpuRegion {
+        uint32_t from, to;   /* its bank's bytes in sound memory */
+        uint32_t spu, bytes; /* its VAGs' in the SPU2's */
+    };
+    static constexpr uint32_t SPU_SAMPLES = 2048;
+    SpuSample spu_samples_[SPU_SAMPLES] = {};
+    uint32_t spu_sample_count_ = 0;
+    SpuRegion spu_regions_[BANKS] = {};
+    uint32_t spu_region_count_ = 0;
+    int16_t spu_owner_[SA1SND_VOICES] = {}; /* each voice's of voices_, 1 and up */
+    struct sa1snd_frame spu_frame_ = {};
+    int16_t spu_change_[SA1SND_VOICES] = {}; /* each voice's change, 1 and up */
+    uint32_t spu_converted_ = 0, spu_bytes_ = 0, spu_us_ = 0;
+    void spu_bank(uint32_t address, uint32_t bytes, bool programs);
+    void spu_forget(uint32_t from, uint32_t to);
+    void spu_note(Voice &voice);
+    void spu_drop(Voice &voice);
+    void spu_block(Voice &voice, float gain, float pitch, uint32_t frames);
+    struct sa1snd_voice &spu_change(uint32_t slot);
+    void spu_send();
 #endif
 
     uint8_t *memory_ = nullptr;

@@ -91,6 +91,9 @@ void Sound::voice_block(Voice &v, int32_t *mix, uint32_t frames)
     }
     if (v.level >= static_cast<float>(LEVELS) - 1 && v.phase != PHASE_ATTACK) {
         v.on = false;
+#ifdef _EE
+        spu_drop(v);
+#endif
         return;
     }
     /* the LFO, as lfo_frame has it, at the block's start */
@@ -137,6 +140,14 @@ void Sound::voice_block(Voice &v, int32_t *mix, uint32_t frames)
             v.lfo -= 1;
         }
     }
+#ifdef _EE
+    /* a voice of the SPU2's: its envelope and LFO there, as its volume and
+     * pitch (engine/ps2/sound_spu.h). its filter goes unheard */
+    if (v.hw) {
+        spu_block(v, v.gain * level_gain(v.level) * lfo_gain, pitch, frames);
+        return;
+    }
+#endif
     /* the filter's envelope, as filter_frame has it */
     if (v.filtered) {
         int phase =
@@ -323,6 +334,14 @@ void Sound::render(int16_t *out, uint32_t frames)
         }
         done += count;
     }
+#ifdef _EE
+    spu_send();
+#endif
 }
 
 } // namespace pc
+
+#ifdef _EE
+/* the PS2's sound effects on the SPU2's own voices */
+#include "sound_spu.h"
+#endif

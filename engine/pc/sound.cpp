@@ -557,6 +557,11 @@ void Sound::drain()
             if (e.bank.kind == SA_BANK_SEQUENCES && e.bank.number < BANKS) {
                 sequence_banks_[e.bank.number] = Place{e.bank.address, bytes};
             }
+#if defined(SA_SMALL) && defined(_EE)
+            /* what lay under its bytes in the SPU2's memory goes, and a
+             * programs bank's samples go there as VAG */
+            spu_bank(e.bank.address, bytes, e.bank.kind == SA_BANK_PROGRAMS);
+#endif
             /* the driver lies at sound memory's start. an fx bank is known
              * by its mark. SFPB holds the DSP's programs, and SFOB holds its
              * outputs' levels and pans */
@@ -683,6 +688,9 @@ void Sound::silence()
         sequence_stop(port);
     }
     for (Voice &v : voices_) {
+#if defined(SA_SMALL) && defined(_EE)
+        spu_drop(v);
+#endif
         v.on = false;
     }
     for (uint32_t i = 0; i < STREAMS; i++) {
@@ -900,6 +908,10 @@ void Sound::note_on(uint32_t port, uint32_t channel, uint32_t key,
                 continue;
             }
             Voice &v = *take_voice();
+#if defined(SA_SMALL) && defined(_EE)
+            /* a voice of the SPU2's whose note this takes stops there */
+            spu_drop(v);
+#endif
             /* the registers are 16-bit words, rNN at split + NN / 2 */
             uint32_t r00 = read16(split), r04 = read16(split + 2);
             uint32_t r10 = read16(split + 8), r14 = read16(split + 10);
@@ -969,6 +981,10 @@ void Sound::note_on(uint32_t port, uint32_t channel, uint32_t key,
             v.damping = damping(r28 & 31);
             v.filter_at = -1;
             gains(v);
+#if defined(SA_SMALL) && defined(_EE)
+            /* on the SPU2's voice, where its sample is there */
+            spu_note(v);
+#endif
             played = true;
             break;
         }

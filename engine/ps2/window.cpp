@@ -18,6 +18,7 @@ extern "C" {
 #include "draw.h"
 #include "pspkernel.h"
 #include "window.h"
+#include "spu.h"
 
 /* the run's vsyncs, as the log tells them (engine/native/native.h) */
 extern "C" unsigned long native_vsyncs;
@@ -29,6 +30,10 @@ extern "C" void *_gp;
 /* the lock ps2sdk's file calls take (its fio), which the sound's calls to
  * the IOP take too */
 extern "C" int _fio_io_sema;
+/* the notes the SPU2's voices took (engine/ps2/sound_spu.h), and whether
+ * the settings ask for the trace */
+extern "C" unsigned long ps2_spu_notes;
+extern "C" int native_trace;
 
 namespace pc {
 
@@ -263,6 +268,19 @@ void play(void *arg)
         w->render(w->user, piece, PIECE);
         w->render_us += sceKernelGetSystemTimeLow() - began;
         w->pieces++;
+        /* the log's word, every 5 seconds, of the SPU2's voices: the notes
+         * they took, and those of each core with an envelope above 0 */
+        if (native_trace && w->pieces % 215 == 0 && ps2::spu_ready()) {
+            struct sa1snd_status st {};
+            uint32_t live[2] = {0, 0};
+
+            ps2::spu_status(st);
+            for (uint32_t i = 0; i < SA1SND_VOICES; i++) {
+                live[i / 24] += st.envelope[i] != 0;
+            }
+            fprintf(stderr, "sa1: the SPU2's voices took %lu notes; %u of core 0's and %u of core 1's sound\n",
+                    ps2_spu_notes, static_cast<unsigned>(live[0]), static_cast<unsigned>(live[1]));
+        }
         /* the piece goes once audsrv's ring has room for it. each call to
          * the IOP is a short one, under the lock of ps2sdk's file calls,
          * so none crosses the game's: audsrv's own wait, a call held at the
@@ -317,6 +335,15 @@ bool window_sound_open(Window *window, SoundRender render, void *user, std::stri
         return false;
     }
     audsrv_set_volume(MAX_VOLUME);
+    {
+        const char *spu_why = "";
+
+        if (ps2::spu_open(spu_why)) {
+            fprintf(stderr, "sa1: sa1snd answers: the SPU2's voices are the sound effects'\n");
+        } else {
+            fprintf(stderr, "sa1: no sa1snd: %s\n", spu_why);
+        }
+    }
     window->render = render;
     window->user = user;
     window->playing = true;

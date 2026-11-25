@@ -249,19 +249,43 @@ $(NATIVE_PROGRAMS:%=$(PS2)/program-%.o): $(PS2)/program-%.o: $(PS2)/program-%.r 
 PS2_LIBC := $(PS2DEV)/ee/mips64r5900el-ps2-elf/lib
 PS2_LIBRARIES := $(addprefix $(PS2_LIBC)/,libc.a libm.a libcglue.a libkernel.a libcdvd.a libpthread.a \
 	libpthreadglue.a libstdc++.a) $(if $(PS2_GOALS),$(shell $(PS2_CC) -print-libgcc-file-name 2> /dev/null))
-# play.c opens the engine, as on the PSP. The drawer's calls are the
-# engine's rows, which the C++ defines out of stubs.py's sight, as the
-# PSP's does
-# audsrv's IOP module, the sound's (engine/ps2/window.cpp), as the
-# program's own bytes, which it loads from memory
-PS2_IRX_OBJ := $(PS2)/obj/irx/audsrv_irx.o
+# The IOP's modules the sound loads (engine/ps2/window.cpp), as the
+# program's own bytes, which it loads from memory: audsrv's, and the sound
+# effects' voices' own (engine/ps2/iop/sa1snd.c), built as ps2sdk's
+# samples/Makefile.iopglobal builds a module
+PS2_IRX_OBJ := $(PS2)/obj/irx/audsrv_irx.o $(PS2)/obj/irx/sa1snd_irx.o
 $(PS2)/obj/irx/audsrv_irx.c: $(PS2_SDK)/iop/irx/audsrv.irx
 	@$(call status,irx,$<)
 	$(Q)mkdir -p $(@D)
 	$(Q)$(PS2_SDK)/bin/bin2c $< $@ audsrv_irx
+$(PS2)/obj/irx/sa1snd_irx.c: $(PS2)/obj/iop/sa1snd.irx
+	@$(call status,irx,$<)
+	$(Q)mkdir -p $(@D)
+	$(Q)$(PS2_SDK)/bin/bin2c $< $@ sa1snd_irx
 $(PS2_IRX_OBJ): %.o: %.c
 	$(Q)$(PS2_CC) -c -o $@ $<
-PS2_MAIN_OBJ := $(PS2_REST_OBJ) $(PS2_CXX_OBJ) $(PS2)/obj/engine/sa1/play.o $(PS2_VU_OBJ) $(PS2_IRX_OBJ)
+PS2_IOP_BIN := $(PS2DEV)/iop/bin/mipsel-none-elf-
+PS2_IOP_CFLAGS := -D_IOP -fno-builtin -G0 -Os -Wall -msoft-float -mno-explicit-relocs \
+	-I$(PS2_SDK)/iop/include -I$(PS2_SDK)/common/include -Iengine/ps2/iop
+$(PS2)/obj/iop/imports.o: engine/ps2/iop/imports.lst engine/ps2/iop/irx_imports.h
+	@$(call status,iop,$<)
+	$(Q)mkdir -p $(@D)
+	$(Q)(printf '#include "irx_imports.h"\n'; cat $<) > $(@D)/build-imports.c
+	$(Q)$(PS2_IOP_BIN)gcc $(PS2_IOP_CFLAGS) -fno-toplevel-reorder -c $(@D)/build-imports.c -o $@
+$(PS2)/obj/iop/sa1snd.o: engine/ps2/iop/sa1snd.c engine/ps2/sa1snd.h engine/ps2/iop/irx_imports.h
+	@$(call status,iop,$<)
+	$(Q)mkdir -p $(@D)
+	$(Q)$(PS2_IOP_BIN)gcc $(PS2_IOP_CFLAGS) -c $< -o $@
+$(PS2)/obj/iop/sa1snd.irx: $(PS2)/obj/iop/sa1snd.o $(PS2)/obj/iop/imports.o
+	@$(call status,irx,$@)
+	$(Q)$(PS2_IOP_BIN)gcc $(PS2_IOP_CFLAGS) -T$(PS2_SDK)/iop/startup/linkfile -o $(@D)/sa1snd.elf $^ -nostdlib -dc -r
+	$(Q)$(PS2_IOP_BIN)strip --strip-unneeded --remove-section=.pdr --remove-section=.comment \
+		--remove-section=.mdebug.abi32 --remove-section=.gnu.attributes -o $(@D)/sa1snd.stripped.elf $(@D)/sa1snd.elf
+	$(Q)$(PS2_SDK)/bin/iopfixup --rb --irx1 --allow-zero-text -o $@ $(@D)/sa1snd.stripped.elf
+# play.c opens the engine, as on the PSP. The drawer's calls are the
+# engine's rows, which the C++ defines out of stubs.py's sight, as the
+# PSP's does
+PS2_MAIN_OBJ :=$(PS2_REST_OBJ) $(PS2_CXX_OBJ) $(PS2)/obj/engine/sa1/play.o $(PS2_VU_OBJ) $(PS2_IRX_OBJ)
 PS2_STUBBED := $(PS2_REST_OBJ)
 -include $(PS2)/obj/engine/sa1/play.d
 $(PS2)/stubs.c: $(PS2_STUBBED) $(NATIVE_PROGRAMS:%=$(PS2)/program-%.o) engine/tools/stubs.py \
@@ -328,6 +352,18 @@ $(PS2)/game/textures/report.csv: $(PS2)/textures_tm2 SHA256SUMS
 $(PS2)/game/textures/resident.txt: engine/ps2/resident.txt $(PS2)/game/textures/report.csv
 	$(Q)cp $< $@
 ps2: $(PS2)/game/textures/report.csv $(PS2)/game/textures/resident.txt
+# The sound effects' banks as the SPU2's VAG, a file for each programs bank
+# of the disc's MLT files, game/sound/CRC.vag, by the CRC32 of its bytes
+# (engine/tools/sounds_vag.cpp, engine/ps2/vab.h). The tool rewrites only
+# the files whose bytes changed
+$(PS2)/sounds_vag: engine/tools/sounds_vag.cpp engine/ps2/vab.h engine/ps2/vag.h $(PS2_NEEDS)
+	@$(call status,c++,$@)
+	$(Q)mkdir -p $(@D)
+	$(Q)$(CXX) $(PS2_PACK_FLAGS) -o $@ $<
+$(PS2)/game/sound/report.csv: $(PS2)/sounds_vag SHA256SUMS
+	@$(call status,vag,$(@D))
+	$(Q)$< $(abspath orig) $(abspath $(PS2)/game)
+ps2: $(PS2)/game/sound/report.csv
 
 # PS2_OUT, from the environment, puts the slice's objects and links outside
 # the tree: on WSL, its own filesystem, where a file's every open and read
@@ -340,7 +376,12 @@ ps2: $(PS2)/game/textures/report.csv $(PS2)/game/textures/resident.txt
 PS2_RUN ?= build/engine/ps2/game
 ifneq ($(abspath $(PS2)),$(abspath build/engine/ps2))
 ps2: $(PS2_RUN)/SONICADV.ELF $(PS2_RUN)/textures.pak $(PS2_RUN)/textures/report.csv \
-	$(PS2_RUN)/textures/resident.txt
+	$(PS2_RUN)/textures/resident.txt $(PS2_RUN)/sound/report.csv
+$(PS2_RUN)/sound/report.csv: $(PS2)/game/sound/report.csv
+	@$(call status,copy,$(@D))
+	$(Q)mkdir -p $(@D)
+	$(Q)cp -u $(PS2)/game/sound/*.vag $(@D)/
+	$(Q)cp $< $@
 $(PS2_RUN)/textures/report.csv: $(PS2)/game/textures/report.csv
 	@$(call status,copy,$(@D))
 	$(Q)mkdir -p $(@D)

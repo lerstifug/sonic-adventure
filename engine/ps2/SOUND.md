@@ -68,6 +68,61 @@ through the IPU.
 
 ## Status
 
-Stage 1 plays, under `sound 1` in the settings: three runs in a row play
-throughout, with no stall. It still needs a listen against the PC build.
-Stage 2 is next, to take the mix off the EE.
+Stage 1 plays, under `sound 1` in the settings, and sounds right: three
+runs in a row play throughout, with no stall.
+
+Stage 2's first steps are in:
+- **`sa1snd`**, the IOP's module (`engine/ps2/iop/`), is built by `ps2.mk`
+  with the IOP's compiler and `iopfixup` as ps2sdk's samples build a
+  module, and is the program's own bytes. It serves SIF RPC over `libsd`:
+  - **upload:** bytes to the SPU2's memory
+  - **frame:** each voice's pitch, ADSR, volume and start, then the voices
+    keyed off and on
+  - **status:** the voices' envelopes and ends
+  - **routing:** each core's voices go to its dry output, and core 1 mixes
+    core 0's output
+- **The EE's client** (`engine/ps2/spu.cpp`) makes each call short and
+  under the file lock, as the sound thread's are.
+- **A VAG encoder** (`engine/ps2/vag.h`): for each block, the five
+  predictors each at the shift its residuals need, and the least error
+  kept.
+- **Checked:** a 440 Hz test tone, encoded, uploaded and keyed on voice 24,
+  reads back an envelope of 16,383 while it plays and 0 after its key-off,
+  and is heard.
+- **The banks as VAG, made in the build:**
+  - `engine/tools/sounds_vag.cpp` reads every MLT file on the disc and
+    writes each programs bank's samples as one file, `game/sound/CRC.vag`,
+    named by the CRC32 of the bank's bytes (`engine/ps2/vab.h`). Its
+    output: 114 MLT files, 132 banks, 1,848 samples, 24.1 MB of VAG.
+  - The game takes a bank's bytes whole from its MLT file, so at a load the
+    PS2 takes their CRC32 and reads that file. It streams the VAG to a
+    region of the SPU2's memory 16 KB at a time.
+  - Converting on the PS2 at load instead took 0.8 s a bank and ran the
+    heap out at Emerald Coast's load. From the files, a bank takes 75 to
+    200 ms and nearly no memory.
+  - **Loops:** the SPU2 loops from a 28-sample block. A sample starts
+    later by the samples that bring its loop's start to a block's, and its
+    loop repeats until it's a whole count of blocks. A loop that would take
+    over 8,192 samples of repeats is stretched to the nearest whole count
+    instead, under a block's share of its pitch.
+- **The notes on the SPU2's voices** (`engine/ps2/sound_spu.h`):
+  - A note whose sample is in the SPU2's memory takes a free voice, of 48.
+    Otherwise it plays in the mixer, as does every note once the voices are
+    all taken.
+  - The render still moves the note's envelope and LFO a block at a time,
+    and sends them as the voice's volume and pitch once a render (23 ms).
+    The SPU2's own envelope stays full, so no envelope is translated.
+  - The render keeps the voice's place by its pitch, to end a sample that
+    doesn't loop.
+  - The filter goes unheard, as it does from the mixer, and the DSP's
+    effects too.
+- **Measured:** the mix costs 7.8% of the EE in Emerald Coast, from 16% to
+  24% with every voice in the mixer.
+- **Routing:** core 0's voices reach the output only as core 1's external
+  input, whose volume (AVOL) `audsrv` leaves at 0, so they were silent
+  until `sa1snd` set it. Notes take core 1's voices first all the same.
+  With `trace 1` the log says, every 5 seconds, how many notes the SPU2's
+  voices took and how many of each core's sound.
+
+The effects play from the SPU2's voices in PCSX2. Next: a closer listen
+against the PC build (loops, envelopes, balance), then reverb (stage 3).
