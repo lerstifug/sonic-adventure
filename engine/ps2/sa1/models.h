@@ -24,6 +24,11 @@
  * nothing, else the cull's turn for the triangle it ends */
 #define MODELS_START 2.0F
 
+/* what the path did, for the raster's report (gs.cpp): the models drawn,
+ * the points their balls took, the strips whose boxes were found, the
+ * corners gathered for VU1, and those lit on the EE */
+uint32_t ps2_models_drawn, ps2_models_points, ps2_models_boxes, ps2_models_corners, ps2_models_ee;
+
 /* shade adds argb whole and takes none of the palette's */
 static void models_flat(struct ps2_vu_shade *shade, uint32_t argb)
 {
@@ -208,13 +213,84 @@ static void models_strip(struct psp_corner *strip, const struct models_set *w, c
     }
 }
 
+/* the sides of the raster's reach a point lies past, as models_box tests
+ * them: bit 0 nearer than the near plane, then the four sides */
+static inline uint32_t models_sides(const float *m, const NJS_POINT3 *p, float reach)
+{
+    float vx = p->x * m[0] + p->y * m[4] + p->z * m[8] + m[12];
+    float vy = p->x * m[1] + p->y * m[5] + p->z * m[9] + m[13];
+    float vz = p->x * m[2] + p->y * m[6] + p->z * m[10] + m[14];
+    float sx = sa1_screen.scale_x * vx + (sa1_screen.cx - 320.0F) * vz;
+    float sy = sa1_screen.scale_y * vy + (sa1_screen.cy - 240.0F) * vz;
+    float wide = reach * 320.0F * vz, high = reach * 240.0F * vz;
+
+    return (vz - 1.0F < 0.0F ? 1U : 0U) | (wide - sx < 0.0F ? 2U : 0U) | (wide + sx < 0.0F ? 4U : 0U) |
+           (high - sy < 0.0F ? 8U : 0U) | (high + sy < 0.0F ? 16U : 0U);
+}
+
+/* the depth of a strip's middle corner, which a kept strip sorts by */
+static inline float models_depth(const float *m, const NJS_POINT3 *points, uint32_t count_points, const Sint16 *at,
+                                 uint32_t n)
+{
+    uint32_t i = (uint16_t)at[n / 2];
+    const NJS_POINT3 *p = &points[i < count_points ? i : 0];
+
+    return p->x * m[2] + p->y * m[6] + p->z * m[10] + m[14];
+}
+
+/* the open batch of VU1's, and its corners */
+struct models_batch {
+    float *out;
+    uint32_t used;
+};
+
+/* room in the open batch for count corners more, or a new batch: where a
+ * run of the strip's goes on, the new one starts again from its last two
+ * corners, k's two before. 0 where no picture is open */
+static int models_room(struct models_batch *b, uint32_t count, int goes_on, const struct psp_state *drawn,
+                       const struct models_set *w, const Sint16 *at, uint32_t k, uint32_t corner)
+{
+    if (b->out && b->used + count <= PS2_VU_CORNERS) {
+        return 1;
+    }
+    if (b->out) {
+        ps2_vu_close(b->used);
+    }
+    if (!(b->out = ps2_vu_open(drawn, &w->shade))) {
+        return 0;
+    }
+    b->used = 0;
+    for (uint32_t j = goes_on ? k - 2 : k; j < k; j++) {
+        models_corner(b->out + 12 * b->used++, w, (uint16_t)at[j], corner + j, MODELS_START);
+    }
+    return 1;
+}
+
+/* the open batch goes, as the EE's draw writes the stream */
+static void models_close(struct models_batch *b)
+{
+    if (b->out) {
+        ps2_vu_close(b->used);
+        b->out = NULL;
+    }
+}
+
+/* corner k's word: the triangle it ends turns as the strip's first, or the
+ * other way for each odd one, and for a reversed strip */
+static inline float models_word(uint32_t k, int cull, int reversed)
+{
+    return k < 2 ? MODELS_START : !cull ? 0.0F : ((k - 2) & 1) != (uint32_t)(reversed != 0) ? -1.0F : 1.0F;
+}
+
 /* draw model under state, 1, or leave it out, 0 */
 static int models_draw(const NJS_MODEL *model, uint8_t mode, const struct draw_state *state)
 {
     static sa_cap_material materials[WALK_MATERIALS];
     static uint8_t cuts[WALK_MATERIALS];
     static struct psp_corner strip[WALK_STRIP];
+    static uint8_t sides[WALK_STRIP];
     const float *m = native_xmtrx();
+    float reach = psp_draw_reach();
     const NJS_POINT3 *points = model->points;
     uint32_t count_points = (uint32_t)model->nbPoint;
     uint32_t count = materials_named(model);
@@ -257,6 +333,8 @@ static int models_draw(const NJS_MODEL *model, uint8_t mode, const struct draw_s
         light[k] = m[4 * k] * (float)seen[0] + m[4 * k + 1] * (float)seen[1] + m[4 * k + 2] * (float)seen[2];
         longest = length > longest ? length : longest;
     }
+    ps2_models_drawn++;
+    ps2_models_points += count_points;
     /* the model's ball in view space, as the walk finds it: within the
      * raster's reach of the frame on each side, its strips go as they are */
     for (uint32_t i = 0; i < count_points; i++) {
@@ -326,8 +404,8 @@ static int models_draw(const NJS_MODEL *model, uint8_t mode, const struct draw_s
                            : 0.0F,
         };
         const Sint16 *at = set->meshes;
-        float *out = NULL;
-        uint32_t used = 0, corner = 0;
+        struct models_batch batch = {NULL, 0};
+        uint32_t corner = 0;
 
         if (named >= count) {
             continue;
@@ -370,35 +448,32 @@ static int models_draw(const NJS_MODEL *model, uint8_t mode, const struct draw_s
             }
             if (cutting) {
                 box = models_box(m, points, count_points, at, n);
+                ps2_models_boxes++;
                 if (box == 1) {
                     at += n;
                     corner += n;
                     continue;
                 }
             }
-            /* a strip that blends, or one across a side, goes on the EE: the
-             * open batch goes first, as the EE's draw writes the stream */
-            if (drawn.blend || box == 2) {
-                if (out) {
-                    ps2_vu_close(used);
-                    out = NULL;
-                }
+            /* a strip that blends goes on the EE to the picture's sort: one
+             * within every side whole, with its depth, which VU1 draws in
+             * its place, and one across a side cut */
+            if (drawn.blend) {
+                models_close(&batch);
                 if (n <= WALK_STRIP) {
                     /* the cut takes the strip's turn on its own, as the
                      * walk's does; a kept strip turns by its cull */
                     drawn.cull = (uint8_t)(!cull ? 0 : box == 2 || !reversed ? 1 : 2);
+                    ps2_models_ee += n;
                     if (box == 2) {
                         models_strip(strip, &w, at, n, corner);
-                        if (!drawn.blend) {
-                            psp_draw_state(&drawn);
-                        }
-                        psp_draw_cut(strip, n, reversed, drawn.blend ? &drawn : NULL, eye[2]);
+                        psp_draw_cut(strip, n, reversed, &drawn, eye[2]);
                     } else {
                         struct psp_corner *room = psp_draw_room(n, 1);
 
                         if (room) {
                             models_strip(room, &w, at, n, corner);
-                            psp_draw_later(eye[2], &drawn, room, n);
+                            psp_draw_later_within(models_depth(m, points, count_points, at, n), &drawn, room, n);
                         }
                     }
                 }
@@ -406,38 +481,96 @@ static int models_draw(const NJS_MODEL *model, uint8_t mode, const struct draw_s
                 corner += n;
                 continue;
             }
-            /* the strip's corners into the batch, a new batch where it's
-             * full, which goes on from the strip's last two corners */
             drawn.cull = 0;
-            for (uint32_t k = 0; k < n; k++) {
-                if (!out || used == PS2_VU_CORNERS) {
-                    uint32_t again = k >= 2 ? 2 : k;
-
-                    if (out) {
-                        ps2_vu_close(used);
-                    }
-                    if (!(out = ps2_vu_open(&drawn, &w.shade))) {
+            if (box != 2) {
+                /* the strip's corners into the batch, a new batch where it's
+                 * full, which goes on from the strip's last two corners */
+                if (!models_room(&batch, 3, 0, &drawn, &w, at, 0, corner)) {
+                    return 1;
+                }
+                for (uint32_t k = 0; k < n; k++) {
+                    if (k >= 2 && !models_room(&batch, 1, 1, &drawn, &w, at, k, corner)) {
                         return 1;
                     }
-                    used = 0;
-                    for (uint32_t j = k - again; j < k; j++) {
-                        models_corner(out + 12 * used++, &w, (uint16_t)at[j], corner + j, MODELS_START);
+                    ps2_models_corners++;
+                    models_corner(batch.out + 12 * batch.used++, &w, (uint16_t)at[k], corner + k,
+                                  models_word(k, cull, reversed));
+                }
+                at += n;
+                corner += n;
+                continue;
+            }
+            /* a strip across a side, by its corners' sides: a triangle
+             * within every side goes to VU1 with the rest, one past a side
+             * whole goes nowhere, and a run of those across goes on the EE,
+             * cut, as a strip of its own */
+            if (n <= WALK_STRIP) {
+                uint32_t k = 2;
+                int run = 0;
+
+                for (uint32_t j = 0; j < n; j++) {
+                    uint32_t i = (uint16_t)at[j];
+
+                    sides[j] = (uint8_t)models_sides(m, &points[i < count_points ? i : 0], reach);
+                }
+                while (k < n) {
+                    uint32_t every = sides[k - 2] & sides[k - 1] & sides[k];
+                    uint32_t any = sides[k - 2] | sides[k - 1] | sides[k];
+
+                    if (every != 0) {
+                        run = 0;
+                        k++;
+                        continue;
+                    }
+                    if (any == 0) {
+                        if (!run) {
+                            if (!models_room(&batch, 3, 0, &drawn, &w, at, k, corner)) {
+                                return 1;
+                            }
+                            for (uint32_t j = k - 2; j < k; j++) {
+                                models_corner(batch.out + 12 * batch.used++, &w, (uint16_t)at[j], corner + j,
+                                              MODELS_START);
+                            }
+                        } else if (!models_room(&batch, 1, 1, &drawn, &w, at, k, corner)) {
+                            return 1;
+                        }
+                        ps2_models_corners++;
+                        models_corner(batch.out + 12 * batch.used++, &w, (uint16_t)at[k], corner + k,
+                                      models_word(k, cull, reversed));
+                        run = 1;
+                        k++;
+                        continue;
+                    }
+                    /* the run of triangles across, from the one k ends */
+                    {
+                        uint32_t first = k - 2, end = k;
+
+                        while (end + 1 < n) {
+                            uint32_t e = sides[end - 1] & sides[end] & sides[end + 1];
+                            uint32_t a = sides[end - 1] | sides[end] | sides[end + 1];
+
+                            if (e != 0 || a == 0) {
+                                break;
+                            }
+                            end++;
+                        }
+                        models_close(&batch);
+                        ps2_models_ee += end - first + 1;
+                        models_strip(strip, &w, at + first, end - first + 1, corner + first);
+                        drawn.cull = (uint8_t)(cull ? 1 : 0);
+                        psp_draw_state(&drawn);
+                        /* a run from an odd triangle turns the strip's other way */
+                        psp_draw_cut(strip, end - first + 1, (reversed != 0) != ((first & 1) != 0), NULL, eye[2]);
+                        drawn.cull = 0;
+                        run = 0;
+                        k = end + 1;
                     }
                 }
-                /* the triangle a corner ends turns as the strip's first, or
-                 * the other way for each odd one, and for a reversed strip */
-                models_corner(out + 12 * used++, &w, (uint16_t)at[k], corner + k,
-                              k < 2   ? MODELS_START
-                              : !cull ? 0.0F
-                                      : ((k - 2) & 1) != (uint32_t)(reversed != 0) ? -1.0F
-                                                                                   : 1.0F);
             }
             at += n;
             corner += n;
         }
-        if (out) {
-            ps2_vu_close(used);
-        }
+        models_close(&batch);
     }
     return 1;
 }

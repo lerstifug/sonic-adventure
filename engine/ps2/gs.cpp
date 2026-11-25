@@ -71,6 +71,8 @@ extern "C" uint32_t VU1Model_CodeEnd __attribute__((section(".vudata")));
 
 /* the walk's figures (engine/psp/sa1/walk.h) */
 extern "C" uint32_t ps2_walk_load_us, ps2_walk_light_us;
+/* the model path's figures (engine/ps2/sa1/models.h) */
+extern "C" uint32_t ps2_models_drawn, ps2_models_points, ps2_models_boxes, ps2_models_corners, ps2_models_ee;
 
 /* the screen's mode, as the settings give it (engine/ps2/main.c): 0 for
  * 480p, the default, 1 for 480i, and in 480i whether the merge circuit
@@ -281,10 +283,15 @@ struct Sent {
 
 /* a triangle that waits for the picture's sort: its draw, its key of depth,
  * and its corners, the three from first in the picture's blend corners */
+/* what waits for the picture's sort of the blends: its draw and its key
+ * of depth. a triangle's corners are the three from first in the picture's
+ * blend corners. a strip VU1 draws whole is count corners from first in the
+ * kept strips', under the picture's place of that index */
 struct Blend {
     Draw d;
     uint32_t key;
     uint32_t first;
+    uint32_t place = 0, count = 0; /* count 0 for a triangle */
 };
 
 struct Placed {
@@ -298,6 +305,7 @@ struct Later {
     psp_state state;
     uint32_t first, count;
     bool triangles; /* else a strip */
+    bool within = false; /* the caller found it within every side, at depth */
 };
 
 /* the picture's fog, as the PowerVR's registers hold it */
@@ -404,6 +412,9 @@ struct Held {
     uint32_t deferred_most = 0, flushed_early = 0;
     /* textures bound in a picture, once each, and the sends before its blends */
     uint32_t distinct = 0, opaque_sends = 0, staging_most = 0;
+    /* the strips the walk's cut sent VU1, the triangles it cut on the EE,
+     * and the triangles the blends' sort took */
+    uint32_t cut_vu = 0, cut_ee = 0, blend_triangles = 0, blend_strips = 0;
     /* MIPTBP1 and MIPTBP2 as last sent */
     uint64_t miptbp1 = 0, miptbp2 = 0;
     /* the last draw begun waits in the list, for its offset pass to follow */
@@ -1725,6 +1736,8 @@ void send_triangles(Held &r, const Draw &d, const Screen &s, const Corner *tri, 
 
 /* the picture's waiting blends, the farthest first, each run of one state
  * as a packet */
+void send_vu(Held &r, const Draw &d, const Placed &placed, const psp_corner *corners, uint32_t count, bool reversed);
+
 void draw_blends(Held &r)
 {
     std::vector<Blend> &b = r.blends;
@@ -1740,6 +1753,7 @@ void draw_blends(Held &r)
         return;
     }
     r.most_blends = std::max<uint32_t>(r.most_blends, n);
+    r.blend_triangles += n;
     /* a counting sort by key, the farthest first: each key's count, then
      * the place each key starts at, the largest keys from 0, then the
      * triangles in their keys' places, each key's in the order they came */
@@ -1758,11 +1772,18 @@ void draw_blends(Held &r)
         order[counts[b[i].key]++] = i;
     }
     for (uint32_t i = 0; i < n;) {
-        const Draw &d = b[order[i]].d;
+        const Blend &at = b[order[i]];
+        const Draw &d = at.d;
         uint32_t j = i;
 
+        /* a kept strip, by VU1 whole, under its own place */
+        if (at.count != 0) {
+            send_vu(r, d, r.places[at.place], r.kept + at.first, at.count, false);
+            i++;
+            continue;
+        }
         run.clear();
-        while (j < n && b[order[j]].d.same(d)) {
+        while (j < n && b[order[j]].count == 0 && b[order[j]].d.same(d)) {
             uint32_t first = b[order[j]].first;
 
             run.push_back(first);
@@ -1980,6 +2001,22 @@ uint32_t pvr_register(uint32_t address)
  * begin_picture reads them so) */
 void read_fog(Held &r)
 {
+    /* the registers as last read: the table below takes a logarithm an
+     * entry, so it's made again only where they changed */
+    static uint32_t seen[130];
+    static bool read;
+    uint32_t now[130];
+
+    now[0] = pvr_register(FOG_DENSITY);
+    now[1] = pvr_register(FOG_COLOR);
+    for (uint32_t i = 0; i < 128; i++) {
+        now[2 + i] = pvr_register(FOG_TABLE + 4 * i);
+    }
+    if (read && memcmp(now, seen, sizeof now) == 0) {
+        return;
+    }
+    memcpy(seen, now, sizeof now);
+    read = true;
     uint32_t density = pvr_register(FOG_DENSITY);
     int mantissa = static_cast<int>(density >> 8 & 0xff);
     int exponent = static_cast<int8_t>(density & 0xff);
@@ -2282,7 +2319,7 @@ static_assert(sizeof(psp_corner) == 24, "send_vu reads a corner as six words");
  * across a side */
 enum class Box { INSIDE, OUTSIDE, ACROSS };
 
-Box box_of(const Placed &placed, const Screen &s, const psp_corner *corners, uint32_t count)
+Box box_of(const Placed &placed, const Screen &s, const psp_corner *corners, uint32_t count, float *depth = nullptr)
 {
     const float *m = placed.matrix;
     float lo[3] = {corners[0].x, corners[0].y, corners[0].z};
@@ -2297,6 +2334,12 @@ Box box_of(const Placed &placed, const Screen &s, const psp_corner *corners, uin
         hi[1] = most(hi[1], c.y);
         lo[2] = least(lo[2], c.z);
         hi[2] = most(hi[2], c.z);
+    }
+    /* the depth of the box's middle */
+    if (depth != nullptr) {
+        float x = (lo[0] + hi[0]) * 0.5F, y = (lo[1] + hi[1]) * 0.5F, z = (lo[2] + hi[2]) * 0.5F;
+
+        *depth = x * m[2] + y * m[6] + z * m[10] + m[14];
     }
     /* the sides every corner lies past, and those any does */
     uint32_t every = 31, any = 0;
@@ -2359,7 +2402,8 @@ void send_vu(Held &r, const Draw &d, const Placed &placed, const psp_corner *cor
     bool textured = d.texture != nullptr, fogged = d.fog != SA_FOG_NONE, high = highlights(d);
     float scale = textured && !d.decal ? 128.0F / 255.0F : 1.0F;
     float su = textured ? d.texture->su / 255.0F : 0.0F, sv = textured ? d.texture->sv / 255.0F : 0.0F;
-    uint64_t prim = GS_SETREG_PRIM(GS_PRIM_PRIM_TRISTRIP, 1, textured ? 1 : 0, fogged ? 1 : 0, 0, 0, 0, 0, 0);
+    uint64_t prim = GS_SETREG_PRIM(GS_PRIM_PRIM_TRISTRIP, 1, textured ? 1 : 0, fogged ? 1 : 0, d.blend ? 1 : 0, 0, 0,
+                                   0, 0);
     uint64_t regs = GS_ST | GS_RGBAQ << 4 | GS_XYZF2_REG << 8;
 
     /* the fog table once a picture, to the stream, ahead of every deferred
@@ -2536,10 +2580,64 @@ void send_corners(Held &r, const Placed &placed, const psp_state &state, const p
     r.strip_us += stamp() - began;
 }
 
-/* the strips the walk kept: they blend, so each goes to the picture's sort */
+/* a kept strip within every side goes to the picture's sort whole, by the
+ * depth of its box's middle, for VU1 to draw in its place. one that adds
+ * its offset over itself takes the EE's second pass, so it stays the EE's,
+ * as one fogged by its points does. false where the EE must draw it */
+bool vu_blend(Held &r, const Later &l)
+{
+    const Placed &placed = r.places[l.place];
+    const psp_corner *c = r.kept + l.first;
+    Screen s = {placed.screen[0], placed.screen[1], placed.screen[2], placed.screen[3]};
+
+    if (!ps2_vu || l.triangles || l.count < 3 || r.blends.size() >= BLENDS_MOST) {
+        return false;
+    }
+    Draw d = draw_of(r, l.state);
+
+    if (!d.blend || d.fog == SA_FOG_VERTEX) {
+        return false;
+    }
+    if (d.offset && d.texture != nullptr && !d.decal) {
+        uint32_t lit = 0;
+
+        for (uint32_t i = 0; i < l.count; i++) {
+            lit |= c[i].offset & 0xffffffU;
+        }
+        if (lit != 0) {
+            return false;
+        }
+    }
+    float depth = l.depth;
+    Box box = l.within ? Box::INSIDE : box_of(placed, s, c, l.count, &depth);
+
+    if (box == Box::OUTSIDE) {
+        r.strips_past++;
+        return true;
+    }
+    if (box == Box::ACROSS) {
+        return false;
+    }
+    Blend bl;
+
+    bl.d = d;
+    bl.key = depth_key(depth);
+    bl.first = l.first;
+    bl.place = l.place;
+    bl.count = l.count;
+    r.blends.push_back(bl);
+    r.blend_strips++;
+    return true;
+}
+
+/* the strips the walk kept: they blend, so each goes to the picture's sort,
+ * a strip within every side whole for VU1, else triangle by triangle */
 void draw_later(Held &r)
 {
     for (const Later &l : r.later) {
+        if (vu_blend(r, l)) {
+            continue;
+        }
         send_corners(r, r.places[l.place], l.state, r.kept + l.first, l.count, l.triangles);
     }
     r.later.clear();
@@ -2898,7 +2996,7 @@ bool psp_submit(const PictureUniform &picture, uint32_t clear, const std::vector
                 "sa1: the GS's last %u pictures: %u triangles, %u us on the EE, %u of them the raster's "
                 "strips, %u its binds, which sent %u textures of %u KB, %u the walk's textures and %u its points' "
                 "light, and %u us on the GS each; %u of VU1's batches, %u triangles, %u strips dropped whole, "
-                "%u palettes sent; %u textures bound, %u sent before the blends; at most %u draws sorted in %u KB, %u lists sent early, %u wraps of the ring; %u bytes "
+                "%u palettes sent; the models' path: %u models, %u points, %u boxes, %u corners to VU1, %u on the EE; %u strips cut by VU1, %u triangles cut on the EE, %u blends, %u of them strips by VU1; %u textures bound, %u sent before the blends; at most %u draws sorted in %u KB, %u lists sent early, %u wraps of the ring; %u bytes "
                 "of the heap in use, %u of them textures; %u pictures taken back\n",
                 static_cast<unsigned>(r.timed), static_cast<unsigned>(r.triangles / r.timed),
                 static_cast<unsigned>(r.make_us / r.timed), static_cast<unsigned>(r.strip_us / r.timed),
@@ -2906,7 +3004,13 @@ bool psp_submit(const PictureUniform &picture, uint32_t clear, const std::vector
                 static_cast<unsigned>(ps2_walk_load_us / r.timed), static_cast<unsigned>(ps2_walk_light_us / r.timed),
                 static_cast<unsigned>(r.gs_us / r.timed), static_cast<unsigned>(r.vu_batches / r.timed),
                 static_cast<unsigned>(r.vu_triangles / r.timed), static_cast<unsigned>(r.strips_past / r.timed),
-                static_cast<unsigned>(r.palettes_sent / r.timed), static_cast<unsigned>(r.distinct / r.timed),
+                static_cast<unsigned>(r.palettes_sent / r.timed), static_cast<unsigned>(ps2_models_drawn / r.timed),
+                static_cast<unsigned>(ps2_models_points / r.timed), static_cast<unsigned>(ps2_models_boxes / r.timed),
+                static_cast<unsigned>(ps2_models_corners / r.timed), static_cast<unsigned>(ps2_models_ee / r.timed),
+                static_cast<unsigned>(r.cut_vu / r.timed),
+                static_cast<unsigned>(r.cut_ee / r.timed), static_cast<unsigned>(r.blend_triangles / r.timed),
+                static_cast<unsigned>(r.blend_strips / r.timed),
+                static_cast<unsigned>(r.distinct / r.timed),
                 static_cast<unsigned>(r.opaque_sends / r.timed), static_cast<unsigned>(r.deferred_most),
                 static_cast<unsigned>(r.staging_most / 1024),
                 static_cast<unsigned>(r.flushed_early), static_cast<unsigned>(r.ring_wraps),
@@ -2919,6 +3023,8 @@ bool psp_submit(const PictureUniform &picture, uint32_t clear, const std::vector
         r.sent_bytes = 0;
         r.vu_batches = r.vu_triangles = r.strips_past = r.palettes_sent = 0;
         r.deferred_most = r.flushed_early = r.ring_wraps = r.distinct = r.opaque_sends = r.staging_most = 0;
+        r.cut_vu = r.cut_ee = r.blend_triangles = r.blend_strips = 0;
+        ps2_models_drawn = ps2_models_points = ps2_models_boxes = ps2_models_corners = ps2_models_ee = 0;
         r.timed = r.triangles = 0;
         r.make_us = r.gs_us = r.strip_us = 0;
     }
@@ -3098,6 +3204,19 @@ extern "C" void psp_draw_later(float depth, const struct psp_state *state, const
         {depth, static_cast<uint32_t>(r.places.size() - 1), *state, static_cast<uint32_t>(corners - r.kept), count, false});
 }
 
+extern "C" void psp_draw_later_within(float depth, const struct psp_state *state, const struct psp_corner *corners,
+                                      uint32_t count)
+{
+    pc::Held &r = held;
+
+    if (!r.picture || corners < r.kept || corners >= r.kept + pc::KEPT_CORNERS) {
+        return;
+    }
+    pc::keep_place(r);
+    r.later.push_back({depth, static_cast<uint32_t>(r.places.size() - 1), *state,
+                       static_cast<uint32_t>(corners - r.kept), count, false, true});
+}
+
 /* a strip that may reach past the frame: the GS's raster cuts every
  * triangle it sends, so the strip goes as any other, as triangles in the
  * strip's turn. a later one is kept, its corners copied */
@@ -3119,6 +3238,7 @@ extern "C" void psp_draw_cut(const struct psp_corner *corners, uint32_t count, i
 
         r.strip_us += stamp() - began;
         if (drawn) {
+            r.cut_vu++;
             return;
         }
     }
@@ -3132,6 +3252,7 @@ extern "C" void psp_draw_cut(const struct psp_corner *corners, uint32_t count, i
     uint32_t made = static_cast<uint32_t>(tri.size());
 
     if (later == nullptr) {
+        r.cut_ee += made / 3;
         pc::send_corners(r, r.place, r.state, tri.data(), made, true);
         return;
     }

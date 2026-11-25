@@ -62,22 +62,66 @@ static char failing[64];
 static int entry_nocase(const char *folder, const char *name, char *out,
                         size_t size)
 {
-    DIR *dir;
-    struct dirent *entry;
-    int found = 0;
+    /* the disc's folders don't change, so each is listed once and kept:
+     * on the PS2 each name a listing reads is a call to the IOP, and a
+     * folder of the disc holds hundreds */
+    enum { LISTINGS = 16 };
+    static struct {
+        char *folder;
+        char **names;
+        size_t count;
+    } kept[LISTINGS];
+    static int listed;
+    int at;
 
-    if (!(dir = opendir(folder))) {
-        return 0;
-    }
-    while ((entry = readdir(dir))) {
-        if (!strcasecmp(entry->d_name, name)) {
-            snprintf(out, size, "%s/%s", folder, entry->d_name);
-            found = 1;
+    for (at = 0; at < listed; at++) {
+        if (!strcmp(kept[at].folder, folder)) {
             break;
         }
     }
-    closedir(dir);
-    return found;
+    if (at == listed) {
+        DIR *dir;
+        struct dirent *entry;
+        size_t room = 0;
+
+        if (!(dir = opendir(folder))) {
+            return 0;
+        }
+        if (listed == LISTINGS) {
+            /* past the kept folders, the oldest goes */
+            for (size_t i = 0; i < kept[0].count; i++) {
+                free(kept[0].names[i]);
+            }
+            free(kept[0].names);
+            free(kept[0].folder);
+            memmove(&kept[0], &kept[1], sizeof kept[0] * (LISTINGS - 1));
+            listed--;
+        }
+        at = listed++;
+        kept[at].folder = strdup(folder);
+        kept[at].names = NULL;
+        kept[at].count = 0;
+        while ((entry = readdir(dir))) {
+            if (kept[at].count == room) {
+                char **more;
+
+                room = room ? room * 2 : 256;
+                if (!(more = realloc(kept[at].names, room * sizeof *more))) {
+                    break;
+                }
+                kept[at].names = more;
+            }
+            kept[at].names[kept[at].count++] = strdup(entry->d_name);
+        }
+        closedir(dir);
+    }
+    for (size_t i = 0; i < kept[at].count; i++) {
+        if (kept[at].names[i] && !strcasecmp(kept[at].names[i], name)) {
+            snprintf(out, size, "%s/%s", folder, kept[at].names[i]);
+            return 1;
+        }
+    }
+    return 0;
 }
 
 /* name's entry in the current directory, as the disc spells it, in out */

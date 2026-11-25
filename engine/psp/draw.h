@@ -80,6 +80,12 @@ void psp_draw_strip(const struct psp_corner *corners, uint32_t count);
  * call, as a strip that blends must */
 void psp_draw_later(float depth, const struct psp_state *state,
                     const struct psp_corner *corners, uint32_t count);
+#ifdef _EE
+/* as psp_draw_later, for a strip its caller found within every side of the
+ * raster's reach: depth is the strip's own, which it sorts by whole */
+void psp_draw_later_within(float depth, const struct psp_state *state,
+                           const struct psp_corner *corners, uint32_t count);
+#endif
 /* a strip whose model may reach past the raster's reach of the frame, from
  * the caller's own memory: its triangles, each cut to what lies within. it
  * draws under the state last set, or where later is given stays for the

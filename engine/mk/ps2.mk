@@ -121,7 +121,11 @@ $(PS2)/obj/gen/%.o: build/gen/%.c $(PS2_PASSES)
 
 # The host's C, against ps2sdk's headers, as psp.mk's PSP_HOST_CFLAGS. The
 # shipped assembly's C reads the runner's headers
-PS2_HOST_CFLAGS := -std=gnu17 -O2 -G0 -DSA_SMALL -fno-strict-aliasing -ffp-contract=off -frounding-math -DNATIVE_DOMAIN=0U \
+# PS2_DEBUG set to -g here adds debug lines, which the console never loads,
+# for the profile's tools to name the source lines (make takes no setting
+# on its command line)
+PS2_DEBUG :=
+PS2_HOST_CFLAGS := $(PS2_DEBUG) -std=gnu17 -O2 -G0 -DSA_SMALL -fno-strict-aliasing -ffp-contract=off -frounding-math -DNATIVE_DOMAIN=0U \
 	-D__ptr32= -D__uptr= -Umips -D_EE -Wno-format -Iengine/ps2 -Iengine/psp -Iengine/native -Iengine/sa1 \
 	-I$(ENGINE_INCLUDE) $(PLAY_MATH_INCLUDE) -I$(PS2_SDK)/ee/include -I$(PS2_SDK)/common/include
 $(eval $(call play_math,$(PS2)/obj/engine/numeric,$$(PS2_CC) -std=c17 -O2 -G0 $$(PLAY_MATH_INCLUDE),$(PS2_NEEDS),ps2))
@@ -198,7 +202,7 @@ $(PS2_HOST_READ:.o=.d): ;
 # scene the one call of the PSP's kernel it makes, ahead of the system's
 # headers
 GSKIT ?= $(PS2DEV)/gsKit
-PS2_CXXFLAGS := -std=gnu++17 -DSA_SMALL -D_EE -fno-exceptions -fno-rtti -Wall -Wextra -Wno-format -Umips -O2 -G0 \
+PS2_CXXFLAGS := $(PS2_DEBUG) -std=gnu++17 -DSA_SMALL -D_EE -fno-exceptions -fno-rtti -Wall -Wextra -Wno-format -Umips -O2 -G0 \
 	-I$(ENGINE_INCLUDE) -Iengine/sa1 -Iengine/pc -Iengine/runtime -Iengine/ps2 -Iengine/psp \
 	-I$(PS2_SDK)/ee/include -I$(PS2_SDK)/common/include -I$(GSKIT)/include
 PS2_CXX_SOURCES := engine/runtime/engine.cpp \

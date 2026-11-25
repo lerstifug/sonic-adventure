@@ -156,6 +156,7 @@ psp_draw_later                       engine       psp      a strip kept for the 
 psp_draw_reach                       engine       psp      how far past the frame the raster takes a strip's corner
 psp_draw_cut                         engine       psp      a strip of a model that may reach past the raster's reach of the frame, which goes a triangle at a time, each cut to what lies within
 ps2_vu_open                          engine       ps2      room in the PS2's picture for a batch of a model's corners, which VU1 draws (engine/ps2/sa1/models.h)
+psp_draw_later_within                engine       ps2      a strip kept for the picture's end that its caller found within the raster's reach, sorted whole by its own depth
 ps2_vu_close                         engine       ps2      that batch's end, of the corners written, which goes to VU1
 ps2_vu_palette                       engine       ps2      the palette a model's batches light by, which goes to VU1's memory
 ps2_textures_begin                   engine       ps2      the start of a load's textures, whose TIM2 files stay open till its end (engine/ps2/textures.cpp)
