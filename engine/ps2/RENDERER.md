@@ -127,6 +127,23 @@ memory every frame by DMA.
    shimmers.
 5. **480i field rendering**, if the texture room is still short there.
 
+   **Done**, under `video 480i` with `fields 1`. A picture is a field's 224
+   lines, 640×224, and the display's frame mode shows it whole in both
+   fields. Every place that maps the game's lines to the screen halves them
+   past the crop (`y_scale`): the EE's corners, both VU1 programs' heads,
+   and the screen's own 2D pixels. Both fields show the same lines, so a
+   thin edge doesn't flicker, and the flicker filter stays off. The
+   vertical resolution halves.
+
+   The screen's buffers and depth take 1.7 MB instead of 3.4, leaving
+   2.4 MB for textures. At the start of Emerald Coast a picture uploads
+   about 9 textures (120 KB) against 136 (1.3 MB) at 480p: the scene's
+   textures stay in the ring. The EE takes about 69 ms against 71.
+
+   Each field is the same picture: drawing the second field half a line
+   lower would give back the vertical resolution, but needs a picture a
+   field, 60 a second.
+
 ## What carries over
 
 - **The VU1 model path** (`models.h`, `model.vsm`): geometry, culling, and

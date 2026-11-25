@@ -76,6 +76,9 @@ extern "C" uint32_t ps2_walk_load_us, ps2_walk_light_us;
  * 480p, the default, 1 for 480i, and in 480i whether the merge circuit
  * filters the flicker, each line shown with half of the line below */
 extern "C" int ps2_interlaced, ps2_deflicker;
+/* 480i drawn a field's 224 lines at a time (engine/ps2/main.c's fields,
+ * RENDERER.md's stage 5) */
+extern "C" int ps2_fields;
 /* whether the GS dithers the 16-bit screen (engine/ps2/main.c's dither) */
 extern "C" int ps2_dither;
 /* whether the run times the raster's strips and binds one by one, as the
@@ -114,13 +117,20 @@ constexpr float CROP_480I = (SCREEN_H - SCREEN_H_480I) / 2;
 
 int screen_height()
 {
-    return ps2_interlaced ? SCREEN_H_480I : SCREEN_H;
+    return ps2_interlaced ? (ps2_fields ? SCREEN_H_480I / 2 : SCREEN_H_480I) : SCREEN_H;
 }
 
 /* the lines the picture moves up on the screen */
 float crop()
 {
     return ps2_interlaced ? CROP_480I : 0.0F;
+}
+
+/* the screen's lines to the game's, past the crop: half where 480i draws a
+ * field's 224 lines, which both fields show */
+float y_scale()
+{
+    return ps2_interlaced && ps2_fields ? 0.5F : 1.0F;
 }
 constexpr float NEAR_Z = 1.0F;
 /* how far past the frame a corner may go, in half-frames: 5 keeps every
@@ -1555,7 +1565,7 @@ void make_sent(const Held &r, const Draw &d, const Screen &s, const Corner &v, b
      * tiles meets at a pixel's edge, where the GS's rule of what a
      * triangle covers leaves no line between two tiles */
     t.x = screen ? floorf(v.x + 0.5F) : s.cx + s.fx * v.x * q;
-    t.y = screen ? floorf(v.y + 0.5F) : s.cy + s.fy * v.y * q - crop();
+    t.y = screen ? floorf(v.y + 0.5F) : (s.cy + s.fy * v.y * q - crop()) * y_scale();
     t.z = screen ? (v.z > 1.0F ? DEPTH_MOST / v.z : DEPTH_MOST) : DEPTH_MOST * q;
     t.f = fog_of(r, d, v, screen ? (v.z > 1.0F ? 1.0F / v.z : 1.0F) : q);
 }
@@ -1812,7 +1822,7 @@ void show_buffer(GSGLOBAL *gs, uint32_t buffer)
     uint32_t at = gs->ScreenBuffer[buffer & 1];
 
     GS_SET_DISPFB2(at / 8192, gs->Width / 64, gs->PSM, 0, 0);
-    if (ps2_interlaced && ps2_deflicker) {
+    if (ps2_interlaced && ps2_deflicker && !ps2_fields) {
         GS_SET_DISPFB1(at / 8192, gs->Width / 64, gs->PSM, 0, 1);
         GS_SET_DISPLAY1(gs->StartX + gs->StartXOffset, gs->StartY + gs->StartYOffset, gs->MagH, gs->MagV,
                         gs->DW - 1, gs->DH - 1);
@@ -1900,9 +1910,10 @@ void open_screen(Held &r)
     gs->Mode = ps2_interlaced ? GS_MODE_NTSC : GS_MODE_DTV_480P;
     gs->Interlace = ps2_interlaced ? GS_INTERLACED : GS_NONINTERLACED;
     /* 480i's field mode reads every other line of one whole picture, each
-     * field its own: its frame mode would read a picture of half the
-     * lines for each field */
-    gs->Field = ps2_interlaced ? GS_FIELD : GS_FRAME;
+     * field its own. its frame mode reads a picture of half the lines whole
+     * for each field: under fields, a picture is a field's 224 lines, and
+     * both fields show it (RENDERER.md's stage 5) */
+    gs->Field = ps2_interlaced && !ps2_fields ? GS_FIELD : GS_FRAME;
     gs->Width = SCREEN_W;
     gs->Height = screen_height();
     /* gsKit's two screen buffers at 32 bits, and depth at 24 (show_buffer) */
@@ -1945,10 +1956,15 @@ void open_screen(Held &r)
     }
     fprintf(stderr,
             "sa1: the GS's screen is %dx%d, %s, two buffers at 32 bits at %u and %u, the depth at 24 at %u; "
-            "%u bytes of its memory free for textures\n",
-            SCREEN_W, screen_height(), ps2_interlaced ? (ps2_deflicker ? "480i, its flicker filtered" : "480i") : "480p",
+            "%u bytes of its memory free for textures; the display's DH %u, MAGV %u, DY %u\n",
+            SCREEN_W, screen_height(),
+            ps2_interlaced ? (ps2_fields      ? "480i, a field's lines shown in both"
+                              : ps2_deflicker ? "480i, its flicker filtered"
+                                              : "480i")
+                           : "480p",
             static_cast<unsigned>(gs->ScreenBuffer[0]), static_cast<unsigned>(gs->ScreenBuffer[1]),
-            static_cast<unsigned>(gs->ZBuffer), 4U * 1024 * 1024 - gs->CurrentPointer);
+            static_cast<unsigned>(gs->ZBuffer), 4U * 1024 * 1024 - gs->CurrentPointer, static_cast<unsigned>(gs->DH),
+            static_cast<unsigned>(gs->MagV), static_cast<unsigned>(gs->StartY));
 }
 
 /* the PowerVR's register at address, as Ninja's setters wrote it */
@@ -2214,7 +2230,7 @@ bool send_strip(Held &r, const Draw &d, const Screen &s, const Corner *corners, 
         const Corner &v = corners[i];
         float q = 1.0F / v.z;
         float x = s.cx + s.fx * v.x * q;
-        float y = s.cy + s.fy * v.y * q - crop();
+        float y = (s.cy + s.fy * v.y * q - crop()) * y_scale();
         uint32_t f = fogged ? fog_of(r, d, v, q) : 255;
         uint32_t red = static_cast<uint32_t>(v.r), green = static_cast<uint32_t>(v.g);
         uint32_t blue = static_cast<uint32_t>(v.b);
@@ -2374,11 +2390,11 @@ void send_vu(Held &r, const Draw &d, const Placed &placed, const psp_corner *cor
         h[7] = 2048.0F;
         memcpy(h + 8, placed.matrix, 16 * sizeof(float));
         h[24] = placed.screen[0];
-        h[25] = placed.screen[1];
+        h[25] = placed.screen[1] * y_scale();
         h[26] = DEPTH_MOST;
         h[27] = 0.0F;
         h[28] = placed.screen[2] + static_cast<float>(r.gs->OffsetX) / 16.0F;
-        h[29] = placed.screen[3] - crop() + static_cast<float>(r.gs->OffsetY) / 16.0F;
+        h[29] = (placed.screen[3] - crop()) * y_scale() + static_cast<float>(r.gs->OffsetY) / 16.0F;
         h[30] = h[31] = 0.0F;
         h[32] = h[33] = h[34] = scale;
         h[35] = 128.0F / 255.0F;
@@ -2814,7 +2830,7 @@ bool psp_submit(const PictureUniform &picture, uint32_t clear, const std::vector
 
             if (screen) {
                 c.x = f.at[0];
-                c.y = f.at[1] - crop();
+                c.y = (f.at[1] - crop()) * y_scale();
                 c.z = f.at[2];
             } else {
                 if (m != nullptr) {
@@ -3218,11 +3234,11 @@ extern "C" float *ps2_vu_open(const struct psp_state *state, const struct ps2_vu
     h[3] = 4.0F;
     memcpy(h + 8, r.place.matrix, 16 * sizeof(float));
     h[24] = r.place.screen[0];
-    h[25] = r.place.screen[1];
+    h[25] = r.place.screen[1] * pc::y_scale();
     h[26] = pc::DEPTH_MOST;
     h[27] = high ? 0.0F : 1.0F;
     h[28] = r.place.screen[2] + static_cast<float>(r.gs->OffsetX) / 16.0F;
-    h[29] = r.place.screen[3] - pc::crop() + static_cast<float>(r.gs->OffsetY) / 16.0F;
+    h[29] = (r.place.screen[3] - pc::crop()) * pc::y_scale() + static_cast<float>(r.gs->OffsetY) / 16.0F;
     /* a highlight's offset: the palette's, or each corner's own */
     h[30] = high && !shade->corner_offsets ? 1.0F : 0.0F;
     h[31] = high && shade->corner_offsets ? 1.0F : 0.0F;

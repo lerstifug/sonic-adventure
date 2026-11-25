@@ -16,7 +16,8 @@
  * does, keys FILE plays FILE's script of keys in the pad's place
  * (engine/native/pads.c), trace 1 has the log name each file the game
  * opens and each program it loads, video 480p or 480i sets the screen's
- * mode, 480p by default, deflicker 0 turns 480i's flicker filter off, and
+ * mode, 480p by default, deflicker 0 turns 480i's flicker filter off,
+ * fields 1 draws 480i a field's 224 lines at a time, and
  * dither 0 the dither of the 16-bit screen, vu 0 keeps every strip on the
  * EE, and models 1 draws the models by the PS2's own path, which comes in
  * stages (engine/ps2/sa1/models.h).
@@ -62,6 +63,10 @@ void syBtExit(void) __attribute__((noreturn));
  * 480i, whose flicker filter is on unless the settings turn it off */
 int ps2_interlaced = 0;
 int ps2_deflicker = 1;
+/* fields 1: 480i draws a picture of a field's 224 lines, which both fields
+ * show, at half the GS's memory for the screen, which goes to textures
+ * (engine/ps2/RENDERER.md's stage 5) */
+int ps2_fields = 0;
 /* dither 0 turns off the GS's dither of the 16-bit screen: gradients then
  * band, where the dither's pattern shows on a sharp display */
 int ps2_dither = 1;
@@ -229,6 +234,10 @@ static int take_target(const char *name, const char *value)
     }
     if (!strcmp(name, "deflicker")) {
         ps2_deflicker = atoi(value);
+        return 1;
+    }
+    if (!strcmp(name, "fields")) {
+        ps2_fields = atoi(value);
         return 1;
     }
     if (!strcmp(name, "dither")) {
