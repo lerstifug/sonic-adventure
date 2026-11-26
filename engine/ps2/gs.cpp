@@ -74,6 +74,8 @@ extern "C" uint32_t ps2_walk_load_us, ps2_walk_light_us;
 /* the model path's figures (engine/ps2/sa1/models.h) */
 extern "C" uint32_t ps2_models_drawn, ps2_models_points, ps2_models_boxes, ps2_models_corners, ps2_models_ee,
     ps2_models_built, ps2_models_cached_corners, ps2_models_volatile, ps2_models_new_uv;
+extern "C" uint32_t ps2_models_short, ps2_models_emptied, ps2_models_room, ps2_models_kept;
+extern "C" void ps2_models_heap_look(void);
 extern "C" uint32_t ps2_models_blend_why[4];
 
 /* the screen's mode, as the settings give it (engine/ps2/main.c): 0 for
@@ -3115,6 +3117,12 @@ bool psp_submit(const PictureUniform &picture, uint32_t clear, const std::vector
                 static_cast<unsigned>(r.flushed_early), static_cast<unsigned>(r.ring_wraps),
                 static_cast<unsigned>(mallinfo().uordblks),
                 static_cast<unsigned>(r.texture_bytes), static_cast<unsigned>(r.taken_back));
+        fprintf(stderr,
+                "sa1: the models' cache: %u KB of corners; %u meshsets left to the strips for the heap's room, "
+                "and %u times it went whole; %u KB of the heap's room at the last look\n",
+                static_cast<unsigned>(ps2_models_kept / 1024), static_cast<unsigned>(ps2_models_short),
+                static_cast<unsigned>(ps2_models_emptied), static_cast<unsigned>(ps2_models_room / 1024));
+        ps2_models_short = ps2_models_emptied = 0;
         r.taken_back = 0;
         ps2_walk_load_us = ps2_walk_light_us = 0;
         r.bind_us = 0;
@@ -3132,6 +3140,8 @@ bool psp_submit(const PictureUniform &picture, uint32_t clear, const std::vector
         r.timed = r.triangles = 0;
         r.make_us = r.gs_us = r.strip_us = 0;
     }
+    /* the model cache's look at the heap's room, once a picture */
+    ps2_models_heap_look();
     r.picture = false;
     r.pictures++;
     return true;

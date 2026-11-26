@@ -25,7 +25,12 @@
  *    picture (gs.cpp's ps2_vu_batch): the EE writes a batch's head alone.
  *    a meshset's points, normals and u and v are checked by a hash each
  *    draw, as the game moves some in place (shape motions, scrolled u and
- *    v), and the cache goes at each load
+ *    v), and the cache goes at each load. it takes only the heap's room
+ *    the game leaves: past MODELS_HEAP_KEEP of the heap's room a meshset
+ *    goes by the strips' path, and past MODELS_HEAP_SHORT the cache goes
+ *    whole. the game's heap is nearly full in places (Emerald Coast's
+ *    stands at 12.8 MB of 13.3 once loaded), and a cache that grew as the
+ *    player ran on took the last of it, which stopped the game
  *
  * a corner's word (model.vsm): 2 where it starts a strip, so it draws
  * nothing, else the cull's turn for the triangle it ends */
@@ -37,6 +42,9 @@
 uint32_t ps2_models_drawn, ps2_models_points, ps2_models_boxes, ps2_models_corners, ps2_models_ee;
 /* and the meshsets whose batches the cache made */
 uint32_t ps2_models_built, ps2_models_cached_corners, ps2_models_volatile, ps2_models_new_uv;
+/* the meshsets the cache left for the heap's room, the times it went whole
+ * for it, the room at the last look, and the cache's bytes of corners */
+uint32_t ps2_models_short, ps2_models_emptied, ps2_models_room, ps2_models_kept;
 /* the meshsets that blend: by env map, by offset, and the rest */
 uint32_t ps2_models_blend_why[4];
 
@@ -334,6 +342,15 @@ void *memalign(size_t align, size_t size);
 static struct models_kept models_kept_at[MODELS_KEPT];
 static uint32_t models_kept_bytes;
 
+/* the heap's room the cache leaves the game, and the room under which it
+ * goes whole */
+#define MODELS_HEAP_KEEP (512U << 10)
+#define MODELS_HEAP_SHORT (256U << 10)
+#include <malloc.h>
+#include <stddef.h>
+void *EndOfHeap(void);
+void *sbrk(ptrdiff_t increment);
+
 /* a meshset's batches go; its slot stays its own where keep says */
 static void models_empty(struct models_kept *k)
 {
@@ -523,6 +540,51 @@ static int models_new_uv(struct models_kept *k, const NJS_MESHSET *set)
     return 1;
 }
 
+/* the heap's room: its free blocks, and what sbrk can take yet, up to
+ * the kernel's end of the heap */
+static uint32_t models_heap_room(void)
+{
+    struct mallinfo m = mallinfo();
+    uintptr_t top = (uintptr_t)sbrk(0), end = (uintptr_t)EndOfHeap();
+
+    return (uint32_t)m.fordblks + (end > top ? (uint32_t)(end - top) : 0U);
+}
+
+/* the cache's bytes of corners at the last look at the heap, and what it may
+ * take past them till the next */
+static uint32_t models_kept_at_look, models_heap_budget;
+
+/* a look at the heap, once a picture, from the raster's end of it (gs.cpp):
+ * a look walks the heap's free blocks, too slow for each meshset. the cache
+ * may take three quarters of the room past MODELS_HEAP_KEEP till the next
+ * look, the rest standing for its batches' heads and their u and v. under
+ * MODELS_HEAP_SHORT it goes whole */
+void ps2_models_heap_look(void)
+{
+    uint32_t room = models_heap_room();
+
+    ps2_models_room = room;
+    if (room < MODELS_HEAP_SHORT && models_kept_bytes != 0) {
+        /* the raster frees the batches once no command reads them */
+        models_forget();
+        ps2_models_emptied++;
+    }
+    models_kept_at_look = models_kept_bytes;
+    models_heap_budget = room > MODELS_HEAP_KEEP ? (room - MODELS_HEAP_KEEP) / 4 * 3 : 0U;
+    ps2_models_kept = models_kept_bytes;
+}
+
+/* whether the heap has room for the cache to make a meshset's batches, by
+ * the last look */
+static int models_heap_allows(void)
+{
+    if (models_kept_bytes < models_kept_at_look + models_heap_budget) {
+        return 1;
+    }
+    ps2_models_short++;
+    return 0;
+}
+
 /* a meshset's batches from the cache, made again where what they were made
  * of changed, or null where the cache doesn't take it */
 static const struct models_kept *models_kept_for(const NJS_MODEL *model, const NJS_MESHSET *set, uint32_t shape,
@@ -569,7 +631,15 @@ static const struct models_kept *models_kept_for(const NJS_MODEL *model, const N
         if (++k->changes > MODELS_CHANGES) {
             return NULL;
         }
+        if (!models_heap_allows()) {
+            /* models_forget may have cleared k: made again at a later
+             * draw, where the room allows */
+            return NULL;
+        }
     } else {
+        if (!models_heap_allows()) {
+            return NULL;
+        }
         k = free_slot ? free_slot : &models_kept_at[slot];
         if (k->set) {
             models_drop(k);

@@ -100,6 +100,8 @@ static void tape_write(void)
     }
     fprintf(taping, "%lu %x %d %d %d %d %u %u\n", native_vsyncs, (unsigned)p->on, p->x1, p->y1, p->x2, p->y2,
             (unsigned)p->r, (unsigned)p->l);
+    /* written out at once, so a run that freezes keeps its tape */
+    fflush(taping);
     last = *p;
     written = 1;
 }
