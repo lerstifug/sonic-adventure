@@ -76,6 +76,8 @@ extern "C" uint32_t ps2_models_drawn, ps2_models_points, ps2_models_boxes, ps2_m
     ps2_models_built, ps2_models_cached_corners, ps2_models_volatile, ps2_models_new_uv;
 extern "C" uint32_t ps2_models_short, ps2_models_emptied, ps2_models_room, ps2_models_kept;
 extern "C" void ps2_models_heap_look(void);
+/* the heap's room (engine/ps2/heap.cpp) */
+extern "C" uint32_t ps2_heap_room(void);
 extern "C" uint32_t ps2_models_blend_why[4];
 
 /* the screen's mode, as the settings give it (engine/ps2/main.c): 0 for
@@ -196,6 +198,9 @@ constexpr uint32_t BLENDS_HEAP_KEEP = 512U << 10;
 constexpr uint32_t SIDE_MOST = 1024;
 /* the longest side a texture mirrored past 1 has a mirrored copy made of */
 constexpr uint32_t MIRROR_MOST = 128;
+/* the heap's room, past a copy's, under which a texture repeats rather than
+ * take a mirrored copy */
+constexpr uint32_t MIRROR_HEAP_KEEP = 1024U << 10;
 /* the PowerVR's registers a picture's fog reads, by their places among the
  * PVR's (engine/sa1/records.c) */
 constexpr uint32_t FOG_COLOR = 0xb0;
@@ -365,6 +370,8 @@ struct Held {
     std::vector<psp_corner> cut_strip;
     /* pictures opened over one still open, whose commands went unsent */
     uint32_t taken_back = 0;
+    /* the mirrored copies left for the heap's room, since the report */
+    uint32_t mirrors_short = 0;
     /* a draw's corners' sides, the indices of its triangles kept, a list's
      * own order, and a strip's triangles */
     std::vector<uint32_t> masks, kept_index, order, strip_index;
@@ -2036,7 +2043,9 @@ void open_screen(Held &r)
                 1 << DMA_CHANNEL_GIF);
     dmaKit_chan_init(DMA_CHANNEL_GIF);
     /* gsKit's queue takes only its own setup's commands */
-    gs = gsKit_init_global_custom(1 << 16, GS_RENDER_QUEUE_PER_POOLSIZE);
+    /* gsKit's queues take only its own setting of the screen: the raster
+     * sends the GS's commands itself (send_stream) */
+    gs = gsKit_init_global_custom(1 << 14, 1 << 12);
     /* 480p, or 480i: the game's pixels map one to one either way, 480i's
      * cropped to its 448 lines (crop) */
     gs->Mode = ps2_interlaced ? GS_MODE_NTSC : GS_MODE_DTV_480P;
@@ -2080,6 +2089,10 @@ void open_screen(Held &r)
     r.ring_at = r.vram_first;
     r.blends.reserve(BLENDS_FIRST);
     r.blend_corners.reserve(3 * BLENDS_FIRST);
+    /* the strips kept for the picture's end, room for 2,048 at once: grown
+     * by doubling, its old room left holes in a heap the stage had filled,
+     * and Perfect Chaos's next 90 KB found none whole */
+    r.later.reserve(2048);
     r.opened = r.kept != nullptr && r.stream[0] != nullptr && r.stream[1] != nullptr && r.staging[0] != nullptr &&
                r.staging[1] != nullptr && r.palette_room[0] != nullptr && r.palette_room[1] != nullptr;
     if (r.opened) {
@@ -2258,6 +2271,15 @@ Texture *mirrored(Held &r, Texture *t, int flip)
     if (w2 > SIDE_MOST || h2 > SIDE_MOST || pw > MIRROR_MOST || ph > MIRROR_MOST) {
         return t;
     }
+    /* nor where the heap is short, by the room at the model cache's last
+     * look: Perfect Chaos's copies took 1 MB of it. it's asked again at the
+     * texture's next draw */
+    if (ps2_models_room < w2 * h2 * bits / 8 + MIRROR_HEAP_KEEP) {
+        r.mirrors_short++;
+        return t;
+    }
+    /* till the next look, the room this takes is gone */
+    ps2_models_room -= w2 * h2 * bits / 8;
     uint8_t *texels = static_cast<uint8_t *>(memalign(128, w2 * h2 * bits / 8));
 
     if (texels == nullptr) {
@@ -3152,10 +3174,13 @@ bool psp_submit(const PictureUniform &picture, uint32_t clear, const std::vector
                 static_cast<unsigned>(r.texture_bytes), static_cast<unsigned>(r.taken_back));
         fprintf(stderr,
                 "sa1: the models' cache: %u KB of corners; %u meshsets left to the strips for the heap's room, "
-                "and %u times it went whole; %u KB of the heap's room at the last look\n",
+                "and %u times it went whole; %u KB of the heap's room at the last look; %u mirrored copies left "
+                "for it\n",
                 static_cast<unsigned>(ps2_models_kept / 1024), static_cast<unsigned>(ps2_models_short),
-                static_cast<unsigned>(ps2_models_emptied), static_cast<unsigned>(ps2_models_room / 1024));
+                static_cast<unsigned>(ps2_models_emptied), static_cast<unsigned>(ps2_models_room / 1024),
+                static_cast<unsigned>(r.mirrors_short));
         ps2_models_short = ps2_models_emptied = 0;
+        r.mirrors_short = 0;
         r.taken_back = 0;
         ps2_walk_load_us = ps2_walk_light_us = 0;
         r.bind_us = 0;
@@ -3638,6 +3663,39 @@ extern "C" int ps2_vu_batch_later(float depth, const struct psp_state *state, co
     r.blends.push_back(bl);
     r.blend_batches++;
     return 1;
+}
+
+/* between pictures, what waits on the GS's reads goes now: once VIF1's DMA
+ * has ended, no command reads the dying batches and copies, nor the lent
+ * textures given back. send_stream lets them go only two streams on, and a
+ * load of the game's draws no picture for a while: the old scene's
+ * textures and the forgotten model cache stayed while the new scene's
+ * files came, and Perfect Chaos's ran the heap out. a load calls it at its
+ * start (engine/ps2/textures.cpp) */
+extern "C" void ps2_raster_settle(void)
+{
+    pc::Held &r = held;
+
+    if (!r.opened || r.picture) {
+        return;
+    }
+    pc::vif_wait();
+    for (void *p : r.dying_sent) {
+        free(p);
+    }
+    for (void *p : r.dying) {
+        free(p);
+    }
+    r.dying_sent.clear();
+    r.dying.clear();
+    std::vector<void *> back;
+
+    back.swap(r.returns_sent);
+    back.insert(back.end(), r.returns.begin(), r.returns.end());
+    r.returns.clear();
+    for (void *lender : back) {
+        pc::ps2_texture_returned(lender);
+    }
 }
 
 extern "C" void ps2_vu_release(void *corners)

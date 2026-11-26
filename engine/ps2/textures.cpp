@@ -7,11 +7,18 @@
  * and kept in memory where textures/resident.txt names it. the console
  * decodes nothing.
  *
+ * a file read while the heap is short comes without its pictures' mip
+ * levels (read_without_mips): the console's heap holds every texture a
+ * stage draws, where the Dreamcast kept them in the PVR's own 8 MB, and
+ * Perfect Chaos's ran it out. those pictures draw from their top level
+ * alone.
+ *
  * the pack stands in for a texture no TIM2 holds: the place of a texture by
  * the index of the disc's textures (textures.bin), as engine/pc/pvr.cpp's
  * find_place picks it, and its texels from the pack beside it
  * (textures.pak, engine/tools/textures_pack.cpp) */
 #include <malloc.h>
+#include <unistd.h>
 
 #include <algorithm>
 #include <stdio.h>
@@ -36,10 +43,15 @@ extern "C" {
 extern unsigned long native_vsyncs;
 extern int game_mode;
 extern short stage_mode;
+/* the stage and act playing (src/stage/stage.h) */
+extern short stage_current, act_current;
 /* textures pak in the settings: the pack's textures, as before the TIM2
  * files (engine/ps2/main.c) */
 extern int ps2_textures_pak;
 }
+
+/* gs.cpp's: what waits on the GS's reads, let go between pictures */
+extern "C" void ps2_raster_settle(void);
 
 namespace pc {
 /* gs.cpp's: the raster's texture of texels laid out as head says, which it
@@ -48,6 +60,9 @@ uint32_t ps2_texture_add_texels(const ps2::TexelsHead &head, void *texels);
 /* and of a TIM2's picture, which draws from the lender's bytes */
 uint32_t ps2_texture_add_picture(const ps2::Lent &lent);
 } // namespace pc
+
+/* the heap's room (heap.cpp) */
+extern "C" uint32_t ps2_heap_room(void);
 
 namespace {
 
@@ -177,6 +192,8 @@ struct Tim2 {
     std::map<uint32_t, uint32_t> fixed_made;
     /* the raster's textures of its pictures, which draw from its bytes */
     uint32_t lent = 0;
+    /* read without its mip levels, for the heap's room */
+    bool mipless = false;
 };
 
 /* each texture file's name id, the game's, to its TIM2's name
@@ -235,6 +252,113 @@ bool during_play()
     return (game_mode == 4 || game_mode == 5 || game_mode == 9) && (stage_mode == 4 || stage_mode == 14);
 }
 
+/* a file is read without its mip levels where the heap's room would fall
+ * under this, past the whole file */
+constexpr uint32_t MIPS_HEAP_KEEP = 2048U << 10;
+
+/* the stages and acts whose own textures fill the heap with their mip
+ * levels: a sweep of every stage and act, a run of 1,500 vsyncs each, left
+ * them under 1.3 MB of the heap's room. every level starts its own loads
+ * with about 5.9 MB of room, so the room at a file's read can't tell these:
+ * Mystic Ruins's first two files come to 4.4 MB. there, each file but the
+ * residents comes without its mips */
+bool lean_stage()
+{
+    static const struct {
+        short stage, act;
+    } LEAN[] = {
+        {6, 2},  /* Sky Deck's third act */
+        {19, 0}, /* Perfect Chaos */
+        {21, 0}, /* Egg Walker */
+        {26, 1}, {26, 3}, /* Station Square */
+        {29, 0}, {29, 1}, /* the Egg Carrier */
+        {33, 0}, {33, 1}, {33, 2}, {33, 3}, /* Mystic Ruins */
+    };
+
+    for (const auto &l : LEAN) {
+        if (stage_current == l.stage && act_current == l.act) {
+            return true;
+        }
+    }
+    return false;
+}
+
+uint32_t align_128(uint32_t n)
+{
+    return (n + 127U) & ~127U;
+}
+
+/* a TIM2 file's bytes without its pictures' mip levels, read a picture at a
+ * time into memory of the size they come to: each picture keeps its head,
+ * its top level and its CLUT, at 128 bytes' alignment, and the sizes of its
+ * levels past the top go to 0, which make_picture reads as one level. null
+ * where it can't */
+uint8_t *read_without_mips(FILE *in, long size, uint32_t &kept)
+{
+    ps2::Tim2Head head;
+
+    if (fseek(in, 0, SEEK_SET) != 0 || fread(&head, sizeof head, 1, in) != 1) {
+        return nullptr;
+    }
+    uint32_t first = head.format == 1 ? ps2::TIM2_ALIGN : sizeof head, total = first;
+
+    /* the bytes they come to */
+    for (uint32_t i = 0, at = first; i < head.pictures; i++) {
+        ps2::Tim2Picture p;
+        ps2::Tim2Mips m{};
+
+        if (at + sizeof p > static_cast<uint32_t>(size) || fseek(in, at, SEEK_SET) != 0 ||
+            fread(&p, sizeof p, 1, in) != 1 || p.total == 0 || (p.mipmaps > 1 && fread(&m, sizeof m, 1, in) != 1)) {
+            return nullptr;
+        }
+        total += p.mipmaps > 1 ? align_128(p.head_bytes + align_128(m.sizes[0]) + p.clut_bytes) : p.total;
+        at += p.total;
+    }
+    uint8_t *bytes = static_cast<uint8_t *>(memalign(128, total));
+
+    if (bytes == nullptr) {
+        return nullptr;
+    }
+    memset(bytes, 0, total);
+    memcpy(bytes, &head, sizeof head);
+    for (uint32_t i = 0, at = first, to = first; i < head.pictures; i++) {
+        ps2::Tim2Picture p;
+        ps2::Tim2Mips m{};
+        bool ok = fseek(in, at, SEEK_SET) == 0 && fread(&p, sizeof p, 1, in) == 1;
+
+        if (ok && p.mipmaps <= 1) {
+            ok = fseek(in, at, SEEK_SET) == 0 && fread(bytes + to, 1, p.total, in) == p.total;
+            at += p.total;
+            to += p.total;
+        } else if (ok) {
+            uint32_t was = p.total, image = 0;
+
+            ok = fread(&m, sizeof m, 1, in) == 1;
+            image = align_128(m.sizes[0]);
+            /* the head, then the top level, then the CLUT past it */
+            ok = ok && fseek(in, at, SEEK_SET) == 0 && fread(bytes + to, 1, p.head_bytes, in) == p.head_bytes &&
+                 fread(bytes + to + p.head_bytes, 1, m.sizes[0], in) == m.sizes[0] &&
+                 fseek(in, at + p.head_bytes + p.image_bytes, SEEK_SET) == 0 &&
+                 fread(bytes + to + p.head_bytes + image, 1, p.clut_bytes, in) == p.clut_bytes;
+            p.image_bytes = image;
+            p.total = align_128(p.head_bytes + image + p.clut_bytes);
+            for (uint32_t k = 1; k < 8; k++) {
+                m.sizes[k] = 0;
+            }
+            memcpy(bytes + to, &p, sizeof p);
+            memcpy(bytes + to + sizeof p, &m, sizeof m);
+            at += was;
+            to += p.total;
+        }
+        if (!ok) {
+            free(bytes);
+            return nullptr;
+        }
+    }
+    kept = total;
+    return bytes;
+}
+
 void close_tm2(Tim2 *t)
 {
     tm2_open.erase(t->name);
@@ -269,12 +393,22 @@ Tim2 *open_tm2(uint32_t file)
 
     fseek(in, 0, SEEK_SET);
     Tim2 *t = new Tim2;
+    /* where the heap is short, without its mip levels */
+    uint32_t room = ps2_heap_room();
+    bool short_heap = size > 0 && (room < static_cast<uint32_t>(size) + MIPS_HEAP_KEEP ||
+                                   (lean_stage() && residents.find(named->second) == residents.end()));
 
     t->name = named->second;
     t->size = static_cast<uint32_t>(size);
-    t->bytes = static_cast<uint8_t *>(memalign(128, static_cast<size_t>(size)));
+    t->bytes = short_heap ? read_without_mips(in, size, t->size) : nullptr;
+    t->mipless = t->bytes != nullptr;
+    if (t->bytes == nullptr) {
+        t->size = static_cast<uint32_t>(size);
+        fseek(in, 0, SEEK_SET);
+        t->bytes = static_cast<uint8_t *>(memalign(128, static_cast<size_t>(size)));
+    }
     if (t->bytes == nullptr || size < static_cast<long>(sizeof(ps2::Tim2Head)) ||
-        fread(t->bytes, 1, static_cast<size_t>(size), in) != static_cast<size_t>(size)) {
+        (!t->mipless && fread(t->bytes, 1, static_cast<size_t>(size), in) != static_cast<size_t>(size))) {
         fclose(in);
         free(t->bytes);
         delete t;
@@ -307,11 +441,14 @@ Tim2 *open_tm2(uint32_t file)
     tm2_open[t->name] = t;
     /* the GS's DMA reads the texels from memory, past the EE's cache */
     FlushCache(0);
-    fprintf(stderr, "sa1: textures %s.tm2, %u bytes, %u pictures, read in %u us at vsync %lu, %s%s\n",
+    fprintf(stderr,
+            "sa1: textures %s.tm2, %u bytes, %u pictures, read in %u us at vsync %lu, %u KB of the heap's room, "
+            "%s%s%s\n",
             t->name.c_str(), t->size, static_cast<unsigned>(t->pictures.size()),
             static_cast<unsigned>(sceKernelGetSystemTimeLow() - began), native_vsyncs,
-            during_play() ? "during play" : "at a pause",
-            t->fixed ? ", fixed" : t->resident ? ", resident" : "");
+            static_cast<unsigned>(room / 1024), during_play() ? "during play" : "at a pause",
+            t->fixed ? ", fixed" : t->resident ? ", resident" : "",
+            t->mipless ? ", without its mips for the heap's room" : "");
     return t;
 }
 
@@ -338,6 +475,10 @@ uint32_t make_picture(Tim2 &t, const Picture &picture)
 
     if (levels > 1) {
         memcpy(&mips, head + sizeof p, sizeof mips);
+        /* a picture read without its mips (read_without_mips) */
+        if (mips.sizes[1] == 0) {
+            levels = 1;
+        }
     } else {
         mips.sizes[0] = p.image_bytes;
     }
@@ -468,6 +609,11 @@ extern "C" uint32_t psp_texture_load(uint32_t global_index, const char *name, ui
  * they stay */
 extern "C" void ps2_textures_begin(void)
 {
+    /* what the last scene drew goes first, its files and the model cache
+     * the load forgot, before this load's files come (gs.cpp) */
+    if (tm2_batch == 0) {
+        ps2_raster_settle();
+    }
     tm2_batch++;
 }
 

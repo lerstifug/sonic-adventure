@@ -302,7 +302,7 @@ $(PS2)/stubs.o: $(PS2)/stubs.c $(PS2_NEEDS)
 # word. The adapter hangs on the calls psp.mk's PSP_WRAPS names, as on the
 # PSP, the sound's atomics are libatomic's, and the pads are libpad's
 # (engine/ps2/window.cpp)
-PS2_WRAPS := pad_scan frame_wait njDrawTriangle3D njDrawPolygon2D njDrawLine3D njDrawTexture njDrawPolygon kmRender
+PS2_WRAPS := malloc calloc realloc memalign pad_scan frame_wait njDrawTriangle3D njDrawPolygon2D njDrawLine3D njDrawTexture njDrawPolygon kmRender
 # ps2sdk's linkfile calls the code's start _ftext, which gdfs.c's test of a
 # read into code knows by the GNU name
 PS2_LINK = $(PS2_CXX) -T$(PS2_SDK)/ee/startup/linkfile -L$(PS2_SDK)/ee/lib -Wl,-zmax-page-size=128 \

@@ -92,6 +92,8 @@ int ps2_music = 1;
 /* the sampling profiler's (engine/ps2/profile.c) */
 static int sampling;
 void ps2_profile_start(void);
+/* the heap's reserve (heap.cpp) */
+void ps2_heap_reserve(void);
 void ps2_profile_write(const char *path);
 
 /* the FPU's FCR31 for the game, as the PSP's runner sets it. the EE always
@@ -367,6 +369,8 @@ int main(int argc, char **argv)
     if (sampling) {
         ps2_profile_start();
     }
+    /* the heap's reserve against a request it can't meet (heap.cpp) */
+    ps2_heap_reserve();
     fprintf(stderr, "sa1: the game starts\n");
     native_run_main(game_stacks, GAME_STACK_SIZE);
     end_run("main returned");

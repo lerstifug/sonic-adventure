@@ -346,10 +346,6 @@ static uint32_t models_kept_bytes;
  * goes whole */
 #define MODELS_HEAP_KEEP (512U << 10)
 #define MODELS_HEAP_SHORT (256U << 10)
-#include <malloc.h>
-#include <stddef.h>
-void *EndOfHeap(void);
-void *sbrk(ptrdiff_t increment);
 
 /* a meshset's batches go; its slot stays its own where keep says */
 static void models_empty(struct models_kept *k)
@@ -540,15 +536,10 @@ static int models_new_uv(struct models_kept *k, const NJS_MESHSET *set)
     return 1;
 }
 
-/* the heap's room: its free blocks, and what sbrk can take yet, up to
- * the kernel's end of the heap */
-static uint32_t models_heap_room(void)
-{
-    struct mallinfo m = mallinfo();
-    uintptr_t top = (uintptr_t)sbrk(0), end = (uintptr_t)EndOfHeap();
-
-    return (uint32_t)m.fordblks + (end > top ? (uint32_t)(end - top) : 0U);
-}
+/* the heap's room, and its look once a picture, which says whether its
+ * reserve went since the last (engine/ps2/heap.cpp) */
+uint32_t ps2_heap_room(void);
+int ps2_heap_look(uint32_t room);
 
 /* the cache's bytes of corners at the last look at the heap, and what it may
  * take past them till the next */
@@ -561,10 +552,12 @@ static uint32_t models_kept_at_look, models_heap_budget;
  * MODELS_HEAP_SHORT it goes whole */
 void ps2_models_heap_look(void)
 {
-    uint32_t room = models_heap_room();
+    uint32_t room = ps2_heap_room();
 
     ps2_models_room = room;
-    if (room < MODELS_HEAP_SHORT && models_kept_bytes != 0) {
+    /* the heap gave its reserve to a request it couldn't meet: the cache
+     * goes whole, as under MODELS_HEAP_SHORT */
+    if ((ps2_heap_look(room) || room < MODELS_HEAP_SHORT) && models_kept_bytes != 0) {
         /* the raster frees the batches once no command reads them */
         models_forget();
         ps2_models_emptied++;

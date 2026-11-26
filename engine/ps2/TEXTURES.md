@@ -201,6 +201,33 @@ later step can skip the PVM's read where its `.tm2` exists, building the
 records from the TIM2's GBIX and names instead. That saves up to a third of
 a second of decoding per large archive at load time.
 
+## The heap's room
+
+The Dreamcast keeps its textures in the PVR's own 8 MB; the PS2 keeps them
+in the EE's heap, 13.3 MB past the program, beside the sound's 2 MB and the
+raster's buffers. Every level starts its own loads with about 5.9 MB of
+room. A sweep of every stage and act, 1,500 vsyncs each with no input,
+found where it runs short, and these give way to it:
+
+- **Mip levels:** a file read while the heap's room is under its size and
+  2 MB more, or in one of the stages that sweep found short
+  (`textures.cpp`'s `lean_stage`: Sky Deck's third act, Perfect Chaos, Egg
+  Walker, two of Station Square's acts, two of the Egg Carrier's and
+  Mystic Ruins), comes without its pictures' mip levels, which draw from
+  their top level alone. That's a quarter of a mipmapped file.
+- **A load lets go first:** what the last scene drew, its textures given
+  back and the model cache's batches, goes once the GS's DMA has ended, at
+  the load's start (`gs.cpp`'s `ps2_raster_settle`). Before, it waited for
+  the next picture, which a load doesn't draw.
+- **Caches by the room:** the model cache, the blends' sort and the
+  mirrored copies take only what the heap's room leaves.
+- **A reserve:** the program holds 1 MB, which a request the heap can't
+  meet takes, and the model cache then goes whole (`heap.cpp`).
+
+Perfect Chaos's opening scene ran the heap out before these; now every stage
+and act runs, the least room at about 450 KB where the model cache fills to
+its margin.
+
 ## Stages, each checked before the next
 
 1. **The converter** (`engine/tools/textures_tm2.cpp`, `engine/ps2/tim2.h`):
