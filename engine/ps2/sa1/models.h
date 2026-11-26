@@ -48,6 +48,12 @@ uint32_t ps2_models_short, ps2_models_emptied, ps2_models_room, ps2_models_kept;
 /* the meshsets that blend: by env map, by offset, and the rest */
 uint32_t ps2_models_blend_why[4];
 
+/* a batch's corners packed for VU1, as the cache keeps them, and their u
+ * and v in the block (engine/ps2/gs.cpp) */
+uint32_t ps2_vu_packed_bytes(uint32_t count);
+void ps2_vu_pack(void *block, const float *corners, uint32_t count);
+int16_t *ps2_vu_packed_uv(void *block, uint32_t count);
+
 /* shade adds argb whole and takes none of the palette's */
 static void models_flat(struct ps2_vu_shade *shade, uint32_t argb)
 {
@@ -355,7 +361,7 @@ static void models_empty(struct models_kept *k)
         ps2_vu_release(k->batches[b].corners);
         ps2_vu_release(k->batches[b].spare);
         free(k->batches[b].uv_at);
-        models_kept_bytes -= k->batches[b].count * (k->batches[b].spare ? 96 : 48);
+        models_kept_bytes -= ps2_vu_packed_bytes(k->batches[b].count) * (k->batches[b].spare ? 2 : 1);
     }
     free(k->batches);
     k->batches = NULL;
@@ -416,7 +422,9 @@ static int models_keep_batch(struct models_kept *k, const float *room, const uin
     struct models_cached *more, *b;
     float lo[3], hi[3], far = 0.0F;
 
-    if (used < 3 || models_kept_bytes + used * 48 > MODELS_KEPT_BYTES) {
+    uint32_t bytes = ps2_vu_packed_bytes(used);
+
+    if (used < 3 || models_kept_bytes + bytes > MODELS_KEPT_BYTES) {
         return used < 3;
     }
     if (!(more = realloc(k->batches, (k->count + 1) * sizeof *more))) {
@@ -424,10 +432,11 @@ static int models_keep_batch(struct models_kept *k, const float *room, const uin
     }
     k->batches = more;
     b = &k->batches[k->count];
-    if (!(b->corners = memalign(64, used * 48))) {
+    if (!(b->corners = memalign(64, bytes))) {
         return 0;
     }
-    memcpy(b->corners, room, used * 48);
+    /* packed, 28 bytes a corner where the room's take 48 (gs.cpp) */
+    ps2_vu_pack(b->corners, room, used);
     if (!(b->uv_at = malloc(used * sizeof *b->uv_at))) {
         free(b->corners);
         return 0;
@@ -458,7 +467,7 @@ static int models_keep_batch(struct models_kept *k, const float *room, const uin
     }
     b->radius = sqrtf(far);
     k->count++;
-    models_kept_bytes += used * 48;
+    models_kept_bytes += bytes;
     return 1;
 }
 
@@ -516,19 +525,22 @@ static int models_new_uv(struct models_kept *k, const NJS_MESHSET *set)
 {
     for (uint32_t b = 0; b < k->count; b++) {
         struct models_cached *cb = &k->batches[b];
+        uint32_t bytes = ps2_vu_packed_bytes(cb->count);
         float *out;
+        int16_t *uv;
 
         if (!cb->spare) {
-            if (models_kept_bytes + cb->count * 48 > MODELS_KEPT_BYTES || !(cb->spare = memalign(64, cb->count * 48))) {
+            if (models_kept_bytes + bytes > MODELS_KEPT_BYTES || !(cb->spare = memalign(64, bytes))) {
                 return 0;
             }
-            memcpy(cb->spare, cb->corners, cb->count * 48);
-            models_kept_bytes += cb->count * 48;
+            memcpy(cb->spare, cb->corners, bytes);
+            models_kept_bytes += bytes;
         }
         out = cb->spare;
+        uv = ps2_vu_packed_uv(out, cb->count);
         for (uint32_t i = 0; i < cb->count; i++) {
-            out[12 * i + 8] = (float)set->vertuv[cb->uv_at[i]].tex.u;
-            out[12 * i + 9] = (float)set->vertuv[cb->uv_at[i]].tex.v;
+            uv[4 * i] = set->vertuv[cb->uv_at[i]].tex.u;
+            uv[4 * i + 1] = set->vertuv[cb->uv_at[i]].tex.v;
         }
         cb->spare = cb->corners;
         cb->corners = out;

@@ -160,6 +160,9 @@ psp_draw_later_within                engine       ps2      a strip kept for the 
 ps2_vu_close                         engine       ps2      that batch's end, of the corners written, which goes to VU1
 ps2_vu_batch                         engine       ps2      a cached batch of a model's corners, which VIF1 reads from the caller's memory (engine/ps2/sa1/models.h)
 ps2_vu_release                       engine       ps2      a cached batch's corners given up, freed once no command reads them
+ps2_vu_packed_bytes                  engine       ps2      the bytes of a cached batch's corners packed for VU1 (engine/ps2/gs.cpp)
+ps2_vu_pack                          engine       ps2      a cached batch's corners packed for VU1, with their own UNPACKs
+ps2_vu_packed_uv                     engine       ps2      a packed batch's u and v, which a scrolled meshset rewrites
 ps2_heap_room                        engine       ps2      the heap's room, which the model cache's look takes (engine/ps2/heap.cpp)
 ps2_heap_look                        engine       ps2      the heap's look once a picture: whether its reserve went, and the reserve again (engine/ps2/heap.cpp)
 ps2_heap_reserve                     engine       ps2      the heap's reserve against a request it can't meet, taken at the start (engine/ps2/heap.cpp)

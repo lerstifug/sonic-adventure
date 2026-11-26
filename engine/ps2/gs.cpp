@@ -166,7 +166,8 @@ constexpr uint32_t TAG_MOST = 65535, DIRECT_MOST = 65535, IMAGE_MOST = 32767;
 /* VIF1's codes */
 constexpr uint32_t VIF_STCYCL = 0x01, VIF_OFFSET = 0x02, VIF_BASE = 0x03, VIF_FLUSHE = 0x10, VIF_FLUSH = 0x11,
                    VIF_MSCAL = 0x14, VIF_DIRECT = 0x50, VIF_MPG = 0x4a;
-constexpr uint32_t UNPACK_V4_32 = 0x6c, UNPACK_V3_32 = 0x68, UNPACK_V2_16 = 0x65, UNPACK_V4_8 = 0x6e;
+constexpr uint32_t UNPACK_V4_32 = 0x6c, UNPACK_V3_32 = 0x68, UNPACK_V2_16 = 0x65, UNPACK_V4_8 = 0x6e,
+                   UNPACK_V4_16 = 0x6d;
 constexpr uint32_t UNPACK_USN = 0x4000, UNPACK_TOPS = 0x8000;
 /* DMA tags' ids */
 constexpr uint32_t TAG_CNT = 1, TAG_REF = 3, TAG_END = 7;
@@ -633,6 +634,21 @@ void stuck(const char *what)
                 static_cast<unsigned>(*D1_TADR), static_cast<unsigned>(*D1_MADR), static_cast<unsigned>(*D1_QWC),
                 static_cast<unsigned>(*reinterpret_cast<volatile uint32_t *>(0x10003c00)),
                 static_cast<unsigned>(*reinterpret_cast<volatile uint32_t *>(0x10003020)));
+        /* VIF1's last code, its count left, its cycle, and the chain's last
+         * words: a code VIF1 took from data, as a batch's freed and taken
+         * again were, shows here */
+        fprintf(stderr, "sa1: VIF1_CODE %08x, VIF1_NUM %08x, VIF1_CYCLE %08x, VIF1_TOPS %08x\n",
+                static_cast<unsigned>(*reinterpret_cast<volatile uint32_t *>(0x10003c80)),
+                static_cast<unsigned>(*reinterpret_cast<volatile uint32_t *>(0x10003c60)),
+                static_cast<unsigned>(*reinterpret_cast<volatile uint32_t *>(0x10003c40)),
+                static_cast<unsigned>(*reinterpret_cast<volatile uint32_t *>(0x10003cc0)));
+        const uint32_t *end = reinterpret_cast<const uint32_t *>(*D1_TADR & 0x01fffff0U);
+
+        for (int q = -16; q <= 0; q++) {
+            fprintf(stderr, "sa1:   %p: %08x %08x %08x %08x\n", static_cast<const void *>(end + 4 * q),
+                    static_cast<unsigned>(end[4 * q]), static_cast<unsigned>(end[4 * q + 1]),
+                    static_cast<unsigned>(end[4 * q + 2]), static_cast<unsigned>(end[4 * q + 3]));
+        }
     }
 }
 
@@ -808,16 +824,25 @@ void send_stream(Held &r, bool last)
         }
     }
     vif_wait();
-    for (void *p : r.dying_sent) {
-        free(p);
+    /* what was let go goes a picture on, at a picture's last stream: a
+     * stream the ring's fill sends early comes before the picture's
+     * deferred draws and sorted blends, which may still read a batch let go
+     * before it. freed at that early stream, a model cache's batch was
+     * taken again while the picture's last stream read it, and its VIF
+     * codes, packed with it (ps2_vu_pack), were another's bytes: VIF1 took
+     * a normal for a DIRECT and waited for its data, in Sky Deck */
+    if (last) {
+        for (void *p : r.dying_sent) {
+            free(p);
+        }
+        r.dying_sent.swap(r.dying);
+        r.dying.clear();
+        for (void *lender : r.returns_sent) {
+            ps2_texture_returned(lender);
+        }
+        r.returns_sent.swap(r.returns);
+        r.returns.clear();
     }
-    r.dying_sent.swap(r.dying);
-    r.dying.clear();
-    for (void *lender : r.returns_sent) {
-        ps2_texture_returned(lender);
-    }
-    r.returns_sent.swap(r.returns);
-    r.returns.clear();
     r.uploads.clear();
     if (last) {
         *GS_CSR = 2;
@@ -3581,7 +3606,9 @@ static void model_tag(pc::Held &r, uint32_t count, uint32_t unpack)
     tag[0] = GIF_TAG(count, 1, 1, r.model_prim, GSKIT_GIF_FLG_PACKED, 3);
     tag[1] = GS_ST | GS_RGBAQ << 4 | pc::GS_XYZF2_REG << 8;
     w[r.model_head + 4] = count;
-    w[unpack] = pc::vif_code(pc::UNPACK_V4_32, count * 3, pc::UNPACK_TOPS | pc::VU_MODEL_HEAD);
+    if (unpack != UINT32_MAX) {
+        w[unpack] = pc::vif_code(pc::UNPACK_V4_32, count * 3, pc::UNPACK_TOPS | pc::VU_MODEL_HEAD);
+    }
 }
 
 /* VU1's work of a batch done, after its corners */
@@ -3597,28 +3624,104 @@ static void model_end(pc::Held &r, uint32_t count)
 
 namespace pc {
 namespace {
-/* a model batch from the caller's memory, by REF, under d */
+/* a packed batch's qwords: the cycle's two settings and three UNPACKs, the
+ * points' 12 bytes and the two halves' 8 each, to a whole qword */
+uint32_t packed_qwords(uint32_t count)
+{
+    return (28 * count + 20 + 15) / 16;
+}
+
+int16_t packed_whole(float v)
+{
+    float n = v >= 0.0F ? v + 0.5F : v - 0.5F;
+
+    return static_cast<int16_t>(n >= 32767.0F ? 32767 : n <= -32767.0F ? -32767 : static_cast<int>(n));
+}
+} // namespace
+} // namespace pc
+
+/* a model batch's corners as the cache keeps them (engine/ps2/sa1/models.h),
+ * packed from the twelve floats a corner of VU1's model program takes: the
+ * point's x, y and z as they are, and the rest as 16-bit whole numbers,
+ * the normal's three times 32767, the corner's offset's most, the u and v,
+ * which the meshset holds as whole numbers, and the corner's word. each
+ * goes to its qword of the corner by its own UNPACK, a qword of three
+ * written (STCYCL 3, 1), and VU1's program turns them to floats. a corner
+ * takes 28 bytes where it took 48, and the cache holds near twice the
+ * corners in the room the heap leaves it. the block holds its own VIF
+ * codes: the batch sends it whole by REF (vu_batch_ref) */
+extern "C" uint32_t ps2_vu_packed_bytes(uint32_t count)
+{
+    return pc::packed_qwords(count) * 16;
+}
+
+extern "C" void ps2_vu_pack(void *block, const float *corners, uint32_t count)
+{
+    uint32_t *w = static_cast<uint32_t *>(block);
+    uint32_t at = 0;
+
+    w[at++] = pc::vif_code(pc::VIF_STCYCL, 0, 3 | 1 << 8);
+    w[at++] = pc::vif_code(pc::UNPACK_V3_32, count, pc::UNPACK_TOPS | pc::VU_MODEL_HEAD);
+    for (uint32_t i = 0; i < count; i++) {
+        memcpy(w + at, corners + 12 * i, 12);
+        at += 3;
+    }
+    w[at++] = pc::vif_code(pc::UNPACK_V4_16, count, pc::UNPACK_TOPS | (pc::VU_MODEL_HEAD + 1));
+    int16_t *h = reinterpret_cast<int16_t *>(w + at);
+
+    for (uint32_t i = 0; i < count; i++) {
+        const float *c = corners + 12 * i;
+
+        h[4 * i] = pc::packed_whole(c[4] * 32767.0F);
+        h[4 * i + 1] = pc::packed_whole(c[5] * 32767.0F);
+        h[4 * i + 2] = pc::packed_whole(c[6] * 32767.0F);
+        h[4 * i + 3] = pc::packed_whole(c[7]);
+    }
+    at += 2 * count;
+    w[at++] = pc::vif_code(pc::UNPACK_V4_16, count, pc::UNPACK_TOPS | (pc::VU_MODEL_HEAD + 2));
+    h = reinterpret_cast<int16_t *>(w + at);
+    for (uint32_t i = 0; i < count; i++) {
+        const float *c = corners + 12 * i;
+
+        h[4 * i] = pc::packed_whole(c[8]);
+        h[4 * i + 1] = pc::packed_whole(c[9]);
+        h[4 * i + 2] = 0;
+        h[4 * i + 3] = pc::packed_whole(c[3]);
+    }
+    at += 2 * count;
+    w[at++] = pc::vif_code(pc::VIF_STCYCL, 0, 1 | 1 << 8);
+    while (at % 4 != 0) {
+        w[at++] = 0;
+    }
+}
+
+/* a packed block's u, v, 0 and word, four to a corner, which a meshset's
+ * scrolled u and v rewrite in place (models.h's models_new_uv) */
+extern "C" int16_t *ps2_vu_packed_uv(void *block, uint32_t count)
+{
+    return reinterpret_cast<int16_t *>(static_cast<uint32_t *>(block) + 2 + 3 * count + 1 + 2 * count + 1);
+}
+
+namespace pc {
+namespace {
+/* a model batch from the caller's memory, by REF, under d: its corners
+ * packed (ps2_vu_pack), with their own UNPACKs, which the head's word tells
+ * VU1's program to turn back to floats */
 void vu_batch_ref(Held &r, const Draw &d, const ps2_vu_shade *shade, const float *corners, uint32_t count)
 {
-    model_head(r, d, shade, 0);
-    /* the UNPACK as a qword's last word, so the corners start the next:
-     * the words before it are VIF1's NOPs, where words after it would be
-     * taken for corners */
-    while (r.at % 4 != 3) {
-        pc::put(r, 0);
-    }
-    uint32_t unpack = r.at;
+    uint32_t qwords = packed_qwords(count);
 
-    pc::put(r, 0);
-    model_tag(r, count, unpack);
+    model_head(r, d, shade, 0);
+    model_tag(r, count, UINT32_MAX);
+    pc::words(r)[r.model_head + 5] = 1;
     if (r.recording) {
         pc::Held::Deferred &rec = r.deferred.back();
 
         rec.ext = corners;
         rec.ext_at = r.at;
-        rec.ext_qwords = count * 3;
+        rec.ext_qwords = qwords;
     } else {
-        pc::send_chunk(r, reinterpret_cast<const uint32_t *>(corners), count * 12);
+        pc::send_chunk(r, reinterpret_cast<const uint32_t *>(corners), qwords * 4);
     }
     /* past the REF, the MSCAL takes a tag of its own */
     pc::room(r, 4);

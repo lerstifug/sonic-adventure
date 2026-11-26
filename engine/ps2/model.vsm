@@ -12,7 +12,9 @@
 ;
 ;   0       the fog's terms: density, fogged (0 or 1), 255 times one less
 ;           fogged, 4
-;   1       x: the corners' count, an integer
+;   1       x: the corners' count, an integer; y: 1 where they come
+;           packed, as the model cache keeps them (gs.cpp's ps2_vu_pack),
+;           else 0
 ;   2-5     the model's matrix, Ninja's rows: a point is a row times it
 ;   6       the screen's scale: focal x, focal y, the depth's most, and one
 ;           less highlighted
@@ -34,7 +36,10 @@
 ;           texture's 255 to a side, and 0, 0. the word is 2 where the
 ;           corner starts a strip, else the cull's turn for the triangle it
 ;           ends, 1 to drop it where its pixels turn one way, -1 the other,
-;           0 never
+;           0 never. packed, the normal and the offset's most, and the u
+;           and v, come as whole numbers, the normal's three times 32767,
+;           and the word in the third qword's w: the program first turns
+;           them to floats in place, and the word to the first qword's w
 ;
 ; each corner's three qwords become what the GS takes of it, in place: ST
 ; with Q, RGBAQ and XYZF2, after the tag at 15. a corner reads all three
@@ -83,6 +88,38 @@ VU1Model_CodeStart:
         NOP                     iaddiu VI04, VI02, 16
         sub.xy VF22, VF00, VF00 NOP
         sub.xy VF23, VF00, VF00 NOP
+        NOP                     ilw.y VI09, 1(VI02)
+        NOP                     iaddiu VI10, VI02, 16
+        NOP                     iadd VI11, VI03, VI00
+        NOP                     NOP
+        NOP                     NOP
+        NOP                     ibeq VI09, VI00, model_corner
+        NOP                     NOP
+model_unpack:
+        NOP                     lq VF10, 0(VI10)
+        NOP                     lq VF16, 1(VI10)
+        NOP                     lq VF30, 2(VI10)
+        NOP                     NOP
+        NOP                     NOP
+        NOP                     NOP
+        itof15.xyz VF16, VF16   NOP
+        itof0.w VF16, VF16      NOP
+        itof0 VF30, VF30        NOP
+        NOP                     NOP
+        NOP                     NOP
+        NOP                     NOP
+        mulw.w VF10, VF30, VF00w NOP
+        NOP                     NOP
+        NOP                     NOP
+        NOP                     NOP
+        NOP                     sq.w VF10, 0(VI10)
+        NOP                     sq VF16, 1(VI10)
+        NOP                     sq VF30, 2(VI10)
+        NOP                     iaddiu VI10, VI10, 3
+        NOP                     isubiu VI11, VI11, 1
+        NOP                     NOP
+        NOP                     ibne VI11, VI00, model_unpack
+        NOP                     NOP
 model_corner:
         NOP                     lq VF10, 0(VI04)
         NOP                     lq VF16, 1(VI04)
