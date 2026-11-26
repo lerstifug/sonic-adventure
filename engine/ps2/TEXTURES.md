@@ -34,9 +34,16 @@ exactly, and loses precision only where a number says it's invisible:
 |---|---|---|
 | 16 or fewer colours | 4-bit with a 16-entry 32-bit CLUT | none |
 | 17 to 256 colours | 8-bit with a 256-entry 32-bit CLUT | none |
-| VQ, more than 256 colours | 8-bit, quantized from the VQ book's at most 1024 colours | small; kept only above an error threshold |
-| RGB565 or ARGB1555, more than 256 colours | 16-bit (CT16) | none on screen: RGB565's sixth green bit is beyond the 15-bit screen |
-| ARGB4444 with graded alpha, more than 256 colours | 32-bit (CT32) | none |
+| More than 256 colours, where a fit to 256 reaches 40 dB | 8-bit, quantized from the VQ book's at most 1024 colours, or the image's own | small; kept only above an error threshold |
+| RGB565 or ARGB1555, more than 256 colours, past the fit | 16-bit (CT16) | none on screen: RGB565's sixth green bit is beyond the 15-bit screen |
+| ARGB4444 with graded alpha, more than 256 colours, past the fit | 32-bit (CT32) | none |
+
+- **The fit for all:** at first only VQ textures were fit to 256 colours.
+  The console's heap holds a stage's textures, and Emerald Coast's filled
+  it, so every texture of more colours now tries the fit, under the same
+  40 dB. Of the disc's 15,900 pictures, 16-bit ones went from 2,828 to 550
+  and 32-bit ones from 363 to 69. Emerald Coast's set went from 5.1 MB to
+  4.5 MB.
 
 - **The CLUT keeps alpha:** a CLUT texture keeps graded alpha in its CLUT,
   so effects and foliage stay 8-bit.

@@ -10,8 +10,11 @@
  * each picture takes the smallest of the GS's formats that holds it whole:
  * 4-bit indices with a CLUT of 16 where it has as few colors, 8-bit with a
  * CLUT of 256 where it has as few, else 16 bits where its alpha is clear or
- * solid, else 32. a VQ texture of more colors, at most its book's 1024, is
- * fit to 256 where the fit's error is below FIT_PSNR, and so 8-bit too.
+ * solid, else 32. a texture of more colors is fit to 256 where the fit's
+ * error is below FIT_PSNR, and so 8-bit too: a VQ one's colors are at most
+ * its book's 1024, and the rest's the image's own. the console's heap
+ * holds a stage's textures, so 8 bits rather than 16 or 32 are half or a
+ * quarter of its room, and of the GS's uploads
  * each picture is decoded back and checked against its image: a whole one
  * may differ by the alpha's halving alone, and the 16-bit by the bits the
  * GS's 5 drop.
@@ -43,11 +46,6 @@ namespace {
 
 /* a fit to 256 colors stands where its error is this low, in dB */
 constexpr double FIT_PSNR = 40.0;
-/* the PVR's VQ layouts */
-bool is_vq(uint8_t layout)
-{
-    return layout == 3 || layout == 4 || layout == 16 || layout == 17;
-}
 
 bool read_all(const std::string &path, std::vector<uint8_t> &bytes)
 {
@@ -328,7 +326,7 @@ uint64_t tex0_of(uint8_t psm, uint32_t w, uint32_t h, bool clut)
 }
 
 /* the picture of an image, by the rules above */
-Made make(const Source &s)
+Made make(const Source &s, bool may_fit = true)
 {
     const pc::Image &image = s.image;
     uint32_t pw = 1U << ps2::side_log2(image.width < 8 ? 8 : image.width);
@@ -358,7 +356,7 @@ Made make(const Source &s)
         }
         std::sort(palette.begin(), palette.end());
         made.kind = four ? "4-bit" : "8-bit";
-    } else if (is_vq(s.layout) && pw >= 8) {
+    } else if (may_fit && pw >= 8) {
         std::vector<std::pair<uint32_t, uint32_t>> colors(counts.begin(), counts.end());
 
         std::sort(colors.begin(), colors.end());
@@ -727,7 +725,7 @@ int main(int argc, char **argv)
 
                 /* still mipmapped where it was, but not VQ */
                 plain_source.layout = has_mips(s.layout) ? 0x02 : 0;
-                m = make(plain_source);
+                m = make(plain_source, false);
                 allowed = strcmp(m.kind, "16-bit") == 0 ? 7 : 1;
                 whole = true;
             }

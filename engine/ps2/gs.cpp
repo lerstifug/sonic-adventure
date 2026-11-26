@@ -187,8 +187,11 @@ static_assert(PS2_VU_CORNERS * 3 <= 255, "a model batch's corners pass an UNPACK
 /* the corners of the strips kept for the picture's end */
 constexpr uint32_t KEPT_CORNERS = 1U << 14;
 /* the triangles that blend a picture holds for its sort. past them a
- * triangle draws as it comes */
-constexpr uint32_t BLENDS_MOST = 1U << 12;
+ * triangle draws as it comes. the sort's room starts at BLENDS_FIRST, and
+ * grows to the most only where the heap has room (blend_room) */
+constexpr uint32_t BLENDS_MOST = 1U << 12, BLENDS_FIRST = BLENDS_MOST / 4;
+/* the heap's room, past what the sort's room takes, that it leaves */
+constexpr uint32_t BLENDS_HEAP_KEEP = 512U << 10;
 /* a texture's longest side the EE keeps: 1024 texels, the GS's most */
 constexpr uint32_t SIDE_MOST = 1024;
 /* the longest side a texture mirrored past 1 has a mirrored copy made of */
@@ -546,6 +549,36 @@ volatile int32_t flip_pending = -1;
 uint32_t vif_code(uint32_t command, uint32_t num, uint32_t immediate)
 {
     return immediate | num << 16 | command << 24;
+}
+
+/* room in the picture's sort for a blend and its corners, 3 for a
+ * triangle's and 0 for a strip's. the room, a blend's and its triangle's
+ * corners', doubles where the heap's room at the model cache's last look
+ * holds twice the new room, which a move of the old takes, and
+ * BLENDS_HEAP_KEEP. else the blend draws as it comes. Emerald Coast's
+ * pictures sort 850 at most and others' 2,600, and the most's room is
+ * 1.3 MB of the heap's 13.3 */
+bool blend_room(Held &r, uint32_t corners)
+{
+    size_t blends = r.blends.capacity(), sents = r.blend_corners.capacity();
+
+    if (r.blends.size() >= BLENDS_MOST) {
+        return false;
+    }
+    if (r.blends.size() < blends && r.blend_corners.size() + corners <= sents) {
+        return true;
+    }
+    size_t more = std::min<size_t>(BLENDS_MOST, std::max<size_t>(BLENDS_FIRST, blends * 2));
+    size_t bytes = more * sizeof(Blend) + 3 * more * sizeof(Sent);
+
+    if (more <= blends || ps2_models_room < 2 * bytes + BLENDS_HEAP_KEEP) {
+        return false;
+    }
+    r.blends.reserve(more);
+    r.blend_corners.reserve(3 * more);
+    /* till the next look, the room this took is gone */
+    ps2_models_room -= static_cast<uint32_t>(bytes);
+    return true;
 }
 
 uint32_t *words(Held &r)
@@ -1737,7 +1770,7 @@ void send_draw(Held &r, const Draw &d, const Screen &s, const Corner *corners, u
                 }
             }
             if (d.blend && !screen && r.picture) {
-                if (r.blends.size() < BLENDS_MOST) {
+                if (blend_room(r, 3)) {
                     Blend bl;
 
                     bl.d = d;
@@ -2045,8 +2078,8 @@ void open_screen(Held &r)
         r.palette_room[i] = static_cast<float *>(memalign(64, PALETTES_MOST * VU_PALETTE_ENTRIES * 16));
     }
     r.ring_at = r.vram_first;
-    r.blends.reserve(BLENDS_MOST);
-    r.blend_corners.reserve(3 * BLENDS_MOST);
+    r.blends.reserve(BLENDS_FIRST);
+    r.blend_corners.reserve(3 * BLENDS_FIRST);
     r.opened = r.kept != nullptr && r.stream[0] != nullptr && r.stream[1] != nullptr && r.staging[0] != nullptr &&
                r.staging[1] != nullptr && r.palette_room[0] != nullptr && r.palette_room[1] != nullptr;
     if (r.opened) {
@@ -2674,7 +2707,7 @@ bool vu_blend(Held &r, const Later &l)
     const psp_corner *c = r.kept + l.first;
     Screen s = {placed.screen[0], placed.screen[1], placed.screen[2], placed.screen[3]};
 
-    if (!ps2_vu || l.triangles || l.count < 3 || r.blends.size() >= BLENDS_MOST) {
+    if (!ps2_vu || l.triangles || l.count < 3 || !blend_room(r, 0)) {
         r.kept_why[l.triangles ? 0 : 4] += l.count / (l.triangles ? 3 : 1);
         return false;
     }
@@ -3588,8 +3621,7 @@ extern "C" int ps2_vu_batch_later(float depth, const struct psp_state *state, co
 
     /* the palette waits in the picture's room only while the picture
      * defers its draws */
-    if (!r.picture || r.model_open || !r.defer || count < 3 || count > PS2_VU_CORNERS ||
-        r.blends.size() >= pc::BLENDS_MOST) {
+    if (!r.picture || r.model_open || !r.defer || count < 3 || count > PS2_VU_CORNERS || !pc::blend_room(r, 0)) {
         return 0;
     }
     pc::Blend bl;
