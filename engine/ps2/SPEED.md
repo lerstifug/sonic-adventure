@@ -16,7 +16,7 @@ in `TEXTURES.md`.
 
 Measured in PCSX2, with the sampling profiler (`sample 1`), the sweep of every
 stage and act, and switches that leave the land out (`skip 1`) or every model
-(`skip 2`), on the `ps2-prebuilt` branch.
+(`skip 2`), on the `ps2-newrender` branch.
 
 | | A picture | Without the land | Without any model |
 |---|---|---|---|
@@ -112,7 +112,7 @@ stages'); half their time with no land stands in.
   sweep of every stage and act runs as before, and its timing table is
   written beside the baseline's.
 
-**The baseline**, taken on the `ps2-prebuilt` branch, which draws as `ps2`
+**The baseline**, taken on the `ps2-newrender` branch, which draws as `ps2`
 does (its CLIP test leaves out nothing while `vuclip` is 0). Its runs, shots
 and profiles are in `build/ps2-speed/baseline`, and the scripts that take a
 step's in `build/ps2-speed/tools`: `baseline.ps1 -Tag NAME` runs the ten
@@ -160,6 +160,35 @@ draws the parts, where it now leaves the triangle out.
   the same program.
 - **Passes** where the ground nearest the eye shows no hole and no crack,
   and the places run near the prototype's times.
+
+**Done.** `model.vsm`'s `model_clip`, as above, and the default (`vuclip 1`;
+`vuclip 0` tests and cuts on the EE, as before). The head grows to 18 qwords:
+qword 14's z holds the near plane's depth (1), 15 the CLIP's constants, 16 a
+fan's GIF tag, which the clip fills in, and 17 the strip's, which the corners
+follow. Past a buffer's 80 corners lie a tag of nothing, a ring of the last
+three corners' view-space data, two polygons' room for the cut, and 36 qwords
+of fans, which go to the GS as they fill and after the strip. Every shot of
+the ten places and of the tape draws as the baseline's, the ground nearest
+the eye whole, and the sweep's 81 runs all run to their end as before.
+
+| | Baseline | Step 1 | | Walk | | EE's cut |
+|---|---|---|---|---|---|---|
+| Emerald Coast, act 1 | 45.0 | 32.6 | −12.4 | 24.5 | 13.8 | 162 to 0 |
+| Emerald Coast, act 2 | 20.3 | 16.8 | −3.5 | 9.0 | 5.8 | 48 to 0 |
+| Windy Valley, act 1 | 41.8 | 34.6 | −7.2 | 19.7 | 14.3 | 94 to 0 |
+| Speed Highway, act 1 | 21.9 | 16.7 | −5.2 | 9.9 | 5.1 | 87 to 0 |
+| Red Mountain, act 1 | 57.0 | 38.4 | −18.6 | 34.2 | 14.6 | 317 to 0 |
+| Sky Deck, act 3 | 75.2 | 64.3 | −10.9 | 42.4 | 31.4 | 181 to 3 |
+| Ice Cap, act 1 | 59.6 | 46.6 | −13.0 | 26.2 | 14.4 | 135 to 0 |
+| Chaos 0 | 59.5 | 46.2 | −13.3 | 21.5 | 9.9 | 199 to 12 |
+| Station Square, act 2 | 51.5 | 27.6 | −23.9 | 35.0 | 11.9 | 452 to 0 |
+| Mystic Ruins, act 1 | 83.5 | 38.3 | −45.2 | 66.7 | 18.8 | 722 to 10 |
+
+Mystic Ruins gains past the projection: with the cut on VU1, the cache's
+batches across a side go whole, where before each picture's strips of them
+went by the EE, and its corners on the EE fall from 6,630 to 892. Four of the
+ten run under 33 ms; Emerald Coast's first act and Windy Valley's are a ms or
+two over.
 
 ### 2. A model's terms once, on VU1
 

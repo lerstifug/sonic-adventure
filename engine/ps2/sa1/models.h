@@ -48,7 +48,7 @@ uint32_t ps2_models_short, ps2_models_emptied, ps2_models_room, ps2_models_kept;
 /* the meshsets that blend: by env map, by offset, and the rest */
 uint32_t ps2_models_blend_why[4];
 
-/* PROTOTYPE: the settings' vuclip (engine/ps2/main.c) */
+/* the settings' vuclip (engine/ps2/main.c) */
 extern int ps2_vuclip;
 
 /* a batch's corners packed for VU1, as the cache keeps them, and their u
@@ -925,8 +925,8 @@ static int models_draw(const NJS_MODEL *model, uint8_t mode, const struct draw_s
                     side[b] = (int8_t)(cutting ? models_ball(m, k->batches[b].center, k->batches[b].radius * scale,
                                                              reach)
                                                : 0);
-                    /* PROTOTYPE: vuclip 1 sends a batch across a side
-                     * whole, which VU1's CLIP leaves out what crosses of */
+                    /* a batch across a side goes to VU1 whole, whose
+                     * model program cuts what crosses (model.vsm) */
                     if (ps2_vuclip && side[b] == 2) {
                         side[b] = 0;
                     }

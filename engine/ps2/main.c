@@ -92,9 +92,11 @@ int ps2_music = 1;
 /* TEMPORARY: skip 1 leaves the land's models out, skip 2 every model
  * (engine/sa1/records.c), to time what drawing them costs */
 int ps2_skip;
-/* PROTOTYPE: vuclip 1 sends the model cache's batches across a side to VU1
- * whole (engine/ps2/sa1/models.h) */
-int ps2_vuclip;
+/* vuclip 1, as it is, sends the model cache's batches across a side of the
+ * reach to VU1 whole, whose model program cuts what crosses
+ * (engine/ps2/model.vsm's model_clip); vuclip 0 tests and cuts their strips
+ * on the EE, as before (engine/ps2/sa1/models.h) */
+int ps2_vuclip = 1;
 /* the sampling profiler's (engine/ps2/profile.c) */
 static int sampling;
 void ps2_profile_start(void);
