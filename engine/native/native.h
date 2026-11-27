@@ -239,6 +239,9 @@ void sa1_chord(void *pad);
  * kept it on */
 void sa1_wide_on(void);
 void sa1_fast_on(void);
+/* the 60 fps toggle on or off, as the player chose it, which a save's load
+ * keeps */
+void sa1_fast_set(int on);
 /* play.c's figures for the readout, the port's on-screen timing display.
  * waited_ns is the time the game's thread waited out vsyncs. device_ns is
  * the device's time for the last picture it timed. late counts the vsyncs

@@ -332,6 +332,11 @@ void sa1_wide_on(void)
 
 void sa1_fast_on(void)
 {
-    port_toggles[TOGGLE_FAST] = TRUE;
+    sa1_fast_set(TRUE);
+}
+
+void sa1_fast_set(int on)
+{
+    port_toggles[TOGGLE_FAST] = on ? TRUE : FALSE;
     port_chosen[TOGGLE_FAST] = TRUE;
 }

@@ -116,7 +116,8 @@ static sa_pc_options options = {.flags = SA_PC_WINDOW | SA_PC_SOUND,
                                 .title = "Sonic Adventure"};
 static const char *build_root = NATIVE_BUILD_IMAGES;
 static int paced = 1;
-static int wide, fast;
+/* fast: the settings' fps, 1 for 60, 0 for 30, -1 where they don't say */
+static int wide, fast = -1;
 static const char *pictures_dir;
 static FILE *video, *times, *audio;
 /* the frames of sound the audio file holds, and the time their render took */
@@ -225,8 +226,8 @@ static int setting(const char *name, const char *value)
         return wide || !strcmp(value, "4:3") ? 1 : -1;
     }
     if (!strcmp(name, "fps")) {
-        fast = !strcmp(value, "60");
-        return fast || !strcmp(value, "30") ? 1 : -1;
+        fast = !strcmp(value, "60") ? 1 : !strcmp(value, "30") ? 0 : -1;
+        return fast >= 0 ? 1 : -1;
     }
     return 0;
 }
@@ -765,8 +766,11 @@ void native_play_open(const char *disc, int recorded)
     if (wide) {
         sa1_wide_on();
     }
-    if (fast) {
-        sa1_fast_on();
+    /* fps 30 holds the 60 fps toggle off as fps 60 holds it on: a save that
+     * kept it on turned it on again at its load, where the settings asked
+     * for 30 */
+    if (fast >= 0) {
+        sa1_fast_set(fast);
     }
     next_vsync = now_ns();
     native_picture_sink = give_picture;
