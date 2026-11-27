@@ -397,7 +397,15 @@ model_ring:
         NOP                     NOP
         NOP                     bal VI15, model_flush
         NOP                     NOP
+; the tag of nothing at 258 waits out the strip's transfer, so the program
+; ends only when VU1 has sent all it wrote: the VIF fills this buffer again
+; with the batch after next once the next batch's program starts, which on
+; the console doesn't wait for the GIF, and a strip still on its way took
+; that batch's corners
 model_done:
+        NOP                     iaddiu VI07, VI02, 258
+        NOP                     NOP
+        NOP                     xgkick VI07
         NOP[E]                  NOP
         NOP                     NOP
 

@@ -175,6 +175,17 @@ strip_corner:
         NOP                     ibne VI03, VI00, strip_corner
         NOP                     NOP
         NOP                     xgkick VI05
+; a GIF tag of nothing at 351, past the most a batch writes, whose XGKICK
+; waits out the strip's: the program ends only when VU1 has sent all it
+; wrote. the VIF fills this buffer again with the batch after next once
+; the next batch's program starts, which on the console doesn't wait for
+; the GIF, and a strip still on its way took that batch's corners
+        NOP                     iaddiu VI06, VI00, 0x4000
+        NOP                     iadd VI06, VI06, VI06
+        NOP                     sq VF00, 351(VI02)
+        NOP                     iaddiu VI07, VI02, 351
+        NOP                     isw.x VI06, 351(VI02)
+        NOP                     xgkick VI07
         NOP[E]                  NOP
         NOP                     NOP
         .align 4
