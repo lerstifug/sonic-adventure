@@ -293,7 +293,7 @@ void Scene::back_plane(const uint32_t back[3])
                       {{0.0F, height, z}, {0.0F, 0.0F}, rgba(back[2]), 0},
                       {{width, height, z}, {0.0F, 0.0F}, rgba(corner), 0}};
 
-    state.flags = BATCH_SCREEN | BATCH_OPAQUE |
+    state.flags = BATCH_SCREEN | BATCH_OPAQUE | BATCH_BACK |
                   static_cast<uint32_t>(SA_FOG_NONE) << BATCH_FOG_SHIFT;
     state.depth = SA_DEPTH_ALWAYS;
     state.depth_write = 0;

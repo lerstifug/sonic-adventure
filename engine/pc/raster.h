@@ -42,6 +42,11 @@ constexpr uint32_t BATCH_COLLECT = 128;
 /* the batch clips at the picture's near_z, as Ninja's full drawer does.
  * other batches clip at z = 1 */
 constexpr uint32_t BATCH_NEAR = 256;
+/* the batch is njSetBackColor's plane (Scene::back_plane), under everything
+ * the picture draws. the PC's raster draws a picture's batches in order, and
+ * the plane first; the PS2's draws them after its models, and tests the
+ * plane's depth (engine/ps2/gs.cpp) */
+constexpr uint32_t BATCH_BACK = 512;
 
 /* how a batch samples its texture. the low two bits hold an SA_FILTER_
  * value. SAMPLE_ADJUST holds the mipmap's D adjust as a material's mip_bias

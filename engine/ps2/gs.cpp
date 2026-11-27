@@ -3081,7 +3081,11 @@ bool psp_submit(const PictureUniform &picture, uint32_t clear, const std::vector
         d.blend = st.blend != 0;
         d.src = st.src;
         d.dst = st.dst;
-        d.depth = st.depth;
+        /* the background plane lies at the far depth Ninja gives it: drawn
+         * here, after the picture's models, it takes only the pixels none
+         * of them drew, by the depth's test, where its order put it under
+         * them on the PC. drawn whole, it hid Ice Cap's first act */
+        d.depth = (st.flags & BATCH_BACK) != 0 ? SA_DEPTH_GEQUAL : st.depth;
         d.depth_write = st.depth_write != 0 && !(sorted && st.blend != 0);
         d.cull = st.cull != 0 && !screen ? 1 : 0;
         d.offset = (st.flags & BATCH_OFFSET) != 0;
