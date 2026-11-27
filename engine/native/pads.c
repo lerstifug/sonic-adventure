@@ -149,16 +149,33 @@ static void tape_read(void)
     pad_record->l = (uint16_t)l;
 }
 
+/* the presses and releases of the vsyncs since the game's last scan */
+static uint32_t pressed, released;
+
+/* the vsync's press and release, kept with those since the last scan, which
+ * the game's next scan takes (__wrap_pad_scan): each press reaches the game
+ * once, however many vsyncs pass between its scans */
+static void keep_presses(void)
+{
+    pressed |= pad_record->press;
+    released |= pad_record->release;
+    pad_record->press = pressed;
+    pad_record->release = released;
+}
+
 /* the live pad's record is read once for each vsync, as the Dreamcast's
- * library does. its press then lasts the one vsync, however many times or
- * few the game scans in it. read at each scan, a press stayed in the record
- * until the next scan, and the game, which takes the record's press before
- * it scans, saw the press that closed its pause menu again, and paused */
+ * library does, and its presses wait for the game's next scan. read at each
+ * scan, a press stayed in the record until the next scan, and the game,
+ * which takes the record's press before it scans, saw the press that closed
+ * its pause menu again, and paused. a press that lasted its one vsync was
+ * lost where the game didn't scan in it, as the pause menu's scans, one a
+ * picture, miss every other vsync, and its Start went unseen */
 void native_pads_vsync(void)
 {
     if (tape && pad_record) {
         tape_read();
         sa1_chord(pad_record);
+        keep_presses();
         return;
     }
     if (native_pad_read && pad_record) {
@@ -167,6 +184,7 @@ void native_pads_vsync(void)
         if (taping) {
             tape_write();
         }
+        keep_presses();
     }
 }
 
@@ -185,6 +203,15 @@ void __wrap_pad_scan(void)
                 (unsigned)pad_record->press, native_vsyncs);
     }
 #endif
+    /* the scan takes the presses since the last, which stay in the record
+     * through the game's step, as the pause menu reads the record itself
+     * after the scan, till the next vsync's read; a second scan before it
+     * takes none */
+    if ((native_pad_read || tape) && pad_record) {
+        pad_record->press = pressed;
+        pad_record->release = released;
+        pressed = released = 0;
+    }
     native_hook_pad_scan(pad_record);
     __real_pad_scan();
     native_hook_pad_scanned();
