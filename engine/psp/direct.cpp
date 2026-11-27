@@ -166,16 +166,27 @@ extern "C" void psp_walk_end(void)
     walk_us += sceKernelGetSystemTimeLow() - walk_began;
 }
 
+/* play.c's figures: the game thread's wait for the vsyncs it paces by
+ * (engine/native/native.h) */
+extern "C" struct sa1_figures_seen {
+    uint64_t waited_ns, device_ns, late, lost;
+} sa1_figures;
+
 extern "C" void psp_frame_report(void)
 {
+    static uint64_t waited_before;
+    uint64_t waited = sa1_figures.waited_ns - waited_before;
+
+    waited_before = sa1_figures.waited_ns;
     if (frames != 0) {
         fprintf(stderr,
                 "sa1: %u pictures, %u us each: %u waiting for the display, "
-                "%u in the walk\n",
+                "%u in the walk, %u paced\n",
                 static_cast<unsigned>(frames),
                 static_cast<unsigned>(frames_us / frames),
                 static_cast<unsigned>(pc::psp_wait_us / frames),
-                static_cast<unsigned>(walk_us / frames));
+                static_cast<unsigned>(walk_us / frames),
+                static_cast<unsigned>(waited / 1000 / frames));
     }
     frames = frames_us = walk_us = 0;
     pc::psp_wait_us = 0;

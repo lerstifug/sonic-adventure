@@ -1873,6 +1873,10 @@ static uint32_t walk_lost;
 /* the PS2's own model path, in the walk's place where the settings' models
  * 1 asks (engine/ps2/main.c) */
 extern int ps2_models;
+/* TEMPORARY: the settings' skip 1 leaves out the land's models, while the
+ * land draws them (src/collision/world.c), and skip 2 every model, to time
+ * what drawing them costs */
+extern int ps2_skip, sa1_land_drawing;
 #include "sa1/models.h"
 #endif
 #endif
@@ -1896,6 +1900,11 @@ void sa1_record_model(const NJS_MODEL *model, uint8_t mode,
      * that keeps a scene still places its instance by the record, and the
      * PSP's keeps none */
     if (flags & SA_DRAW_OUT) {
+        return;
+    }
+#endif
+#ifdef _EE
+    if (ps2_skip == 2 || (ps2_skip == 1 && sa1_land_drawing)) {
         return;
     }
 #endif

@@ -29,8 +29,15 @@
 ;   12      what adds to it: red, green, blue, alpha, of 255
 ;   13      127.5, 255, 1/65536, 1/256
 ;   14      65536, 256, 0, 0
-;   15      the GIF tag of the strip: PRE, PRIM, PACKED, ST RGBAQ XYZF2
-;   16-     the corners, three qwords each: the point's x, y and z, and the
+;   15      PROTOTYPE: 0; one over the reach's half width and half height,
+;           in a corner's pixels before the divide over its depth; and
+;           twice the near plane's depth. a corner whose pixels lie past
+;           either, or nearer than the near plane, draws no triangle: CLIP
+;           tests each, and a triangle any of whose three corners it put
+;           outside takes the ADC bit, as a culled one does
+;   16      the GIF tag of the strip: PRE, PRIM, PACKED, ST RGBAQ XYZF2,
+;           which the corners after it follow as XGKICK sends them
+;   17-     the corners, three qwords each: the point's x, y and z, and the
 ;           corner's word; the normal's x, y and z, and the corner's own
 ;           offset's most of its three, of 255; the u and v, in the
 ;           texture's 255 to a side, and 0, 0. the word is 2 where the
@@ -84,12 +91,13 @@ VU1Model_CodeStart:
         NOP                     lq VF19, 12(VI02)
         NOP                     lq VF20, 13(VI02)
         NOP                     lq VF24, 14(VI02)
-        NOP                     iaddiu VI05, VI02, 15
-        NOP                     iaddiu VI04, VI02, 16
+        NOP                     lq.yzw VF31, 15(VI02)
+        NOP                     iaddiu VI05, VI02, 16
+        NOP                     iaddiu VI04, VI02, 17
         sub.xy VF22, VF00, VF00 NOP
         sub.xy VF23, VF00, VF00 NOP
         NOP                     ilw.y VI09, 1(VI02)
-        NOP                     iaddiu VI10, VI02, 16
+        NOP                     iaddiu VI10, VI02, 17
         NOP                     iadd VI11, VI03, VI00
         NOP                     NOP
         NOP                     NOP
@@ -140,6 +148,25 @@ model_corner:
         maddz.w VF17, VF00, VF17z NOP
         maxx.w VF12, VF12, VF00x NOP
         mul.xy VF15, VF11, VF05 NOP
+        NOP                     NOP
+        NOP                     NOP
+        NOP                     NOP
+        muly.x VF26, VF15, VF31y NOP
+        mulz.y VF26, VF15, VF31z NOP
+        subw.z VF26, VF11, VF31w NOP
+        mulz.w VF26, VF00, VF11z NOP
+        NOP                     NOP
+        NOP                     NOP
+        NOP                     NOP
+        clipw.xyz VF26, VF26w   NOP
+        NOP                     NOP
+        NOP                     NOP
+        NOP                     NOP
+        NOP                     fcand VI01, 0x03ffff
+        NOP                     NOP
+        NOP                     mfir.x VF12, VI01
+        NOP                     NOP
+        itof0.x VF12, VF12      NOP
         mulx.w VF17, VF17, VF20x NOP
         sub.w VF14, VF10, VF12  NOP
         addx.w VF17, VF17, VF20x NOP
@@ -285,6 +312,10 @@ model_corner:
         NOP                     NOP
         NOP                     NOP
         addw.x VF28, VF28, VF12w NOP
+        NOP                     NOP
+        NOP                     NOP
+        NOP                     NOP
+        max.x VF28, VF28, VF12  NOP
         NOP                     NOP
         NOP                     NOP
         NOP                     NOP

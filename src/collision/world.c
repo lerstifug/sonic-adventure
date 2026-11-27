@@ -215,6 +215,10 @@ static struct world_object world_added[ADDED];
 /* the land's entries to draw this frame */
 static Sint16 world_drawn_count;
 static struct land_entry *world_drawn[DRAWN];
+
+/* TEMPORARY: whether the land draws its models now, which the PS2's timing
+ * of the land reads (engine/sa1/records.c) */
+int sa1_land_drawing;
 /* nothing reads or writes it, so its type is unknown */
 static Uint32 dat_8c763e6c[1024];
 /* world_land_list_visible sets it to -1, and nothing reads it */
@@ -472,9 +476,11 @@ static void world_land_run(struct task *task)
     if (world_land_shown == TRUE) {
         if (!frame_step) {
             world_land_list_visible();
+            sa1_land_drawing = 1;
             world_land_draw_visible();
             world_land_play_motions();
             world_land_draw_motions();
+            sa1_land_drawing = 0;
         } else {
             world_land_play_motions();
         }
@@ -491,8 +497,10 @@ static void world_land_draw(struct task *task)
     draw_attr_save();
     if (world_land_shown == TRUE && !frame_step) {
         world_land_list_visible();
+        sa1_land_drawing = 1;
         world_land_draw_visible();
         world_land_draw_motions();
+        sa1_land_drawing = 0;
     }
     draw_attr_restore();
     draw_set_material(0.0F, 0.0F, 0.0F, 0.0F);

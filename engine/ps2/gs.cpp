@@ -184,7 +184,7 @@ static_assert(12 + VU_CORNERS * 7 + 1 <= VU_OFFSET, "a strip batch passes VU1's 
  * the strip program's; and a model batch's head, in qwords, its GIF tag
  * the last: its corners, three qwords each, which become what each sends
  * in place, fit in 352 with it */
-constexpr uint32_t VU_MODEL_AT = 512, VU_MODEL_HEAD = 16;
+constexpr uint32_t VU_MODEL_AT = 512, VU_MODEL_HEAD = 17, VU_MODEL_TAG = VU_MODEL_HEAD - 1;
 static_assert(VU_MODEL_HEAD + PS2_VU_CORNERS * 3 <= VU_OFFSET, "a model batch passes VU1's buffer");
 static_assert(PS2_VU_CORNERS * 3 <= 255, "a model batch's corners pass an UNPACK's count");
 /* the corners of the strips kept for the picture's end */
@@ -3578,6 +3578,12 @@ static void model_head(pc::Held &r, const pc::Draw &d, const struct ps2_vu_shade
     h[55] = 1.0F / 256.0F;
     h[56] = 65536.0F;
     h[57] = 256.0F;
+    /* PROTOTYPE: the reach's sides for VU1's CLIP, as a corner's pixels
+     * before the divide over its depth, each side's the nearer to the
+     * center, and twice the near plane's depth (model.vsm) */
+    h[61] = 1.0F / (pc::REACH * 320.0F - fabsf(r.place.screen[2] - 320.0F));
+    h[62] = 1.0F / ((pc::REACH * 240.0F - fabsf(r.place.screen[3] - 240.0F)) * pc::y_scale());
+    h[63] = 2.0F;
     r.model_head = r.at;
     r.at += pc::VU_MODEL_HEAD * 4;
 }
@@ -3601,7 +3607,7 @@ extern "C" float *ps2_vu_open(const struct psp_state *state, const struct ps2_vu
 static void model_tag(pc::Held &r, uint32_t count, uint32_t unpack)
 {
     uint32_t *w = pc::words(r);
-    u64 *tag = reinterpret_cast<u64 *>(w + r.model_head + (pc::VU_MODEL_HEAD - 1) * 4);
+    u64 *tag = reinterpret_cast<u64 *>(w + r.model_head + pc::VU_MODEL_TAG * 4);
 
     tag[0] = GIF_TAG(count, 1, 1, r.model_prim, GSKIT_GIF_FLG_PACKED, 3);
     tag[1] = GS_ST | GS_RGBAQ << 4 | pc::GS_XYZF2_REG << 8;

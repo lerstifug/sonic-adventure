@@ -89,6 +89,12 @@ int ps2_sort = 1;
 /* music 0 leaves the streams, music and voices, out of the sound, so the
  * sound effects are heard alone (engine/pc/mixer.h) */
 int ps2_music = 1;
+/* TEMPORARY: skip 1 leaves the land's models out, skip 2 every model
+ * (engine/sa1/records.c), to time what drawing them costs */
+int ps2_skip;
+/* PROTOTYPE: vuclip 1 sends the model cache's batches across a side to VU1
+ * whole (engine/ps2/sa1/models.h) */
+int ps2_vuclip;
 /* the sampling profiler's (engine/ps2/profile.c) */
 static int sampling;
 void ps2_profile_start(void);
@@ -283,6 +289,14 @@ static int take_target(const char *name, const char *value)
     }
     if (!strcmp(name, "sort")) {
         ps2_sort = atoi(value);
+        return 1;
+    }
+    if (!strcmp(name, "vuclip")) {
+        ps2_vuclip = atoi(value);
+        return 1;
+    }
+    if (!strcmp(name, "skip")) {
+        ps2_skip = atoi(value);
         return 1;
     }
     if (!strcmp(name, "music")) {
