@@ -21,3 +21,7 @@ __pycache__/
 *.[Gg][Dd][Ii]
 *.[Rr][Aa][Ww]
 /tools/sdl3-mingw
+
+
+#my folders for local testings
+/test_local

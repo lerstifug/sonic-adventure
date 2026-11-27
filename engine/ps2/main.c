@@ -102,6 +102,8 @@ static int sampling;
 void ps2_profile_start(void);
 /* the heap's reserve (heap.cpp) */
 void ps2_heap_reserve(void);
+/* the USB drive's drivers, for a program started from one (usb.cpp) */
+int ps2_usb_open(const char *program);
 void ps2_profile_write(const char *path);
 
 /* the FPU's FCR31 for the game, as the PSP's runner sets it. the EE always
@@ -348,8 +350,10 @@ int main(int argc, char **argv)
     FILE *log;
 
     (void)argc;
-    (void)argv;
     (void)native_fpu_host();
+    /* a program started from a USB drive reaches its folder there first
+     * (usb.cpp) */
+    ps2_usb_open(argc > 0 ? argv[0] : NULL);
     /* the log beside the program, where the folder takes a file. the
      * console's own output keeps the run's words otherwise, as an
      * emulator's log shows them */

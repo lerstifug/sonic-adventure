@@ -254,6 +254,14 @@ PS2_LIBRARIES := $(addprefix $(PS2_LIBC)/,libc.a libm.a libcglue.a libkernel.a l
 # effects' voices' own (engine/ps2/iop/sa1snd.c), built as ps2sdk's
 # samples/Makefile.iopglobal builds a module
 PS2_IRX_OBJ := $(PS2)/obj/irx/audsrv_irx.o $(PS2)/obj/irx/sa1snd_irx.o
+# and the USB drive's, which a program started from one loads to reach its
+# folder there (engine/ps2/usb.c)
+PS2_USB_IRX := iomanX usbd bdm bdmfs_fatfs usbmass_bd
+PS2_IRX_OBJ += $(PS2_USB_IRX:%=$(PS2)/obj/irx/%_irx.o)
+$(PS2_USB_IRX:%=$(PS2)/obj/irx/%_irx.c): $(PS2)/obj/irx/%_irx.c: $(PS2_SDK)/iop/irx/%.irx
+	@$(call status,irx,$<)
+	$(Q)mkdir -p $(@D)
+	$(Q)$(PS2_SDK)/bin/bin2c $< $@ $*_irx
 $(PS2)/obj/irx/audsrv_irx.c: $(PS2_SDK)/iop/irx/audsrv.irx
 	@$(call status,irx,$<)
 	$(Q)mkdir -p $(@D)

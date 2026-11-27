@@ -166,6 +166,7 @@ ps2_vu_packed_uv                     engine       ps2      a packed batch's u an
 ps2_heap_room                        engine       ps2      the heap's room, which the model cache's look takes (engine/ps2/heap.cpp)
 ps2_heap_look                        engine       ps2      the heap's look once a picture: whether its reserve went, and the reserve again (engine/ps2/heap.cpp)
 ps2_heap_reserve                     engine       ps2      the heap's reserve against a request it can't meet, taken at the start (engine/ps2/heap.cpp)
+ps2_usb_open                         engine       ps2      the USB drive's drivers, for a program started from one (engine/ps2/usb.cpp)
 ps2_vu_batch_later                   engine       ps2      a cached batch that blends, which waits for the picture's sort of the blends
 ps2_vu_palette                       engine       ps2      the palette a model's batches light by, which goes to VU1's memory
 ps2_textures_begin                   engine       ps2      the start of a load's textures, whose TIM2 files stay open till its end (engine/ps2/textures.cpp)
