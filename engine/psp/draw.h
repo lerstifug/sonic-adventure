@@ -174,6 +174,14 @@ float *ps2_vu_open(const struct psp_state *state, const struct ps2_vu_shade *sha
  * them up */
 void ps2_vu_batch(const struct psp_state *state, const struct ps2_vu_shade *shade, const float *corners,
                   uint32_t count);
+/* a meshset's batches as ps2_vu_batch's, under one state and shade: its
+ * state and head made once, and its batches one draw of the picture's,
+ * which its sort applies once. ps2_vu_set_open takes the most batches to
+ * come, and 0 where the raster can't keep them, which the caller then
+ * sends by ps2_vu_batch; ps2_vu_set_close ends them */
+int ps2_vu_set_open(const struct psp_state *state, const struct ps2_vu_shade *shade, uint32_t batches);
+void ps2_vu_set_batch(const float *corners, uint32_t count);
+void ps2_vu_set_close(void);
 /* corners ps2_vu_batch sent: the raster frees them, from malloc, once no
  * command it sent reads them */
 void ps2_vu_release(void *corners);

@@ -276,6 +276,15 @@ struct Draw {
                dst == o.dst && depth == o.depth && depth_write == o.depth_write && offset == o.offset &&
                fog == o.fog && mip == o.mip && k == o.k;
     }
+
+    /* the same, but for K, TEX1's alone */
+    bool same_but_k(const Draw &o) const
+    {
+        return texture == o.texture && decal == o.decal && alpha == o.alpha && clamp_u == o.clamp_u &&
+               clamp_v == o.clamp_v && linear == o.linear && cut == o.cut && blend == o.blend && src == o.src &&
+               dst == o.dst && depth == o.depth && depth_write == o.depth_write && offset == o.offset &&
+               fog == o.fog && mip == o.mip;
+    }
 };
 
 /* a corner in view space, with its texture's place over the stored sides,
@@ -421,12 +430,17 @@ struct Held {
          * sorts by its first pass's keys, right after it */
         const Texture *by;
         uint32_t second;
-        /* a cached batch's corners, which go by a REF of their own from
-         * the caller's memory after the staging's words to ext_at */
-        const void *ext = nullptr;
-        uint32_t ext_at = 0, ext_qwords = 0;
+        /* its cached batches' corners, exts' ext_count from ext_first,
+         * which go by REFs of their own from the caller's memory, each
+         * after the staging's words to its at */
+        uint32_t ext_first = 0, ext_count = 0;
     };
     std::vector<Deferred> deferred;
+    struct Ext {
+        const void *corners;
+        uint32_t at, qwords;
+    };
+    std::vector<Ext> exts;
     std::vector<uint32_t> deferred_order;
     /* the picture's palettes, by their keys, as VU1 takes them, two
      * pictures' rooms in turn; the one the open draw lights by */
@@ -443,6 +457,8 @@ struct Held {
     uint32_t distinct = 0, opaque_sends = 0, staging_most = 0;
     /* the strips the walk's cut sent VU1, the triangles it cut on the EE,
      * and the triangles the blends' sort took */
+    /* apply's calls, and those the last draw's state served */
+    uint32_t applies = 0, applies_kept = 0;
     uint32_t cut_vu = 0, cut_ee = 0, blend_triangles = 0, blend_strips = 0, batches_cached = 0, blend_batches = 0;
     /* the triangles the EE's own path took, by where they came from: the
      * walk's cut, its kept strips, the scene's batches in the world, and
@@ -456,6 +472,11 @@ struct Held {
     uint32_t blend_lit = 0;
     /* MIPTBP1 and MIPTBP2 as last sent */
     uint64_t miptbp1 = 0, miptbp2 = 0;
+    /* the draw apply last sent the registers of, while applied_ok: a draw
+     * of its state again sends nothing, and one apart in its K alone sends
+     * TEX1 alone. what else sends those registers clears applied_ok */
+    Draw applied;
+    bool applied_ok = false;
     /* the last draw begun waits in the list, for its offset pass to follow */
     bool base_deferred = false;
     /* whether the picture sent VU1 its fog table */
@@ -465,6 +486,8 @@ struct Held {
     uint32_t model_head = 0, model_unpack = 0;
     uint64_t model_prim = 0;
     bool model_open = false;
+    /* a meshset's batches open (ps2_vu_set_open), under model_terms */
+    bool set_open = false;
     /* the palette in VU1's memory, by ps2_vu_palette's key, none at a
      * picture's open; and the picture's sends of one */
     uint32_t vu_palette = UINT32_MAX;
@@ -1094,14 +1117,19 @@ bool place(Held &r, Texture *t)
         }
         uint32_t end = static_cast<uint32_t>(at) + t->blocks;
 
-        for (size_t i = r.resident.size(); i-- > 0;) {
-            Texture *o = r.resident[i];
+        /* the resident lie by their blocks, none over another, so their ends
+         * run in order too: those over the room are one run of them, found
+         * by a search where each bind once looked at all */
+        auto first_over = std::partition_point(r.resident.begin(), r.resident.end(), [at](const Texture *o) {
+            return static_cast<uint32_t>(o->block) + o->blocks <= static_cast<uint32_t>(at);
+        });
+        auto past_over = first_over;
 
-            if (o != t && static_cast<uint32_t>(o->block) < end &&
-                static_cast<uint32_t>(o->block) + o->blocks > static_cast<uint32_t>(at)) {
-                unplace(r, o);
-            }
+        while (past_over != r.resident.end() && static_cast<uint32_t>((*past_over)->block) < end) {
+            (*past_over)->block = -1;
+            ++past_over;
         }
+        r.resident.erase(first_over, past_over);
         r.ring_at = end;
     }
     t->block = at;
@@ -1145,6 +1173,26 @@ void apply(Held &r, const Draw &d)
     uint64_t miptbp1 = r.miptbp1, miptbp2 = r.miptbp2;
     bool mip = false;
 
+    r.applies++;
+    /* the sort puts draws of one state together: the last draw's state
+     * holds, its texture still bound, or differs in K alone */
+    if (r.applied_ok && r.sent && d.texture == r.bound && d.same_but_k(r.applied)) {
+        r.applies_kept++;
+        if (d.k == r.applied.k) {
+            return;
+        }
+        tex1 = d.mip ? GS_SETREG_TEX1(0, d.texture->levels - 1, d.linear ? 1 : 0, d.linear ? 4 : 2, 0, 0,
+                                      static_cast<uint64_t>(static_cast<uint16_t>(d.k) & 0xfffU))
+                     : GS_SETREG_TEX1(0, 0, d.linear ? 1 : 0, d.linear ? 1 : 0, 0, 0, 0);
+        if (tex1 != r.tex1) {
+            uint64_t name = GS_TEX1_1;
+
+            send_registers(r, &tex1, &name, 1);
+            r.tex1 = tex1;
+        }
+        r.applied = d;
+        return;
+    }
     if (d.texture != nullptr) {
         Texture *t = const_cast<Texture *>(d.texture);
         /* a texture moves only at a bind, so the texture last bound stays
@@ -1257,6 +1305,8 @@ void apply(Held &r, const Draw &d)
     r.test = test;
     r.zbuf = zbuf;
     r.sent = true;
+    r.applied = d;
+    r.applied_ok = true;
 }
 
 /* the deferred draws (RENDERER.md's stage 2). while a picture is open, an
@@ -1425,16 +1475,20 @@ void flush_deferred(Held &r)
             sent_palette = rec.palette;
         }
         apply(r, rec.d);
-        if (rec.ext != nullptr) {
-            send_chunk(r, staged + rec.first, rec.ext_at - rec.first);
-            send_chunk(r, static_cast<const uint32_t *>(rec.ext), rec.ext_qwords * 4);
-            send_chunk(r, staged + rec.ext_at, rec.end - rec.ext_at);
-        } else {
-            send_chunk(r, staged + rec.first, rec.end - rec.first);
+        uint32_t from = rec.first;
+
+        for (uint32_t e = rec.ext_first; e < rec.ext_first + rec.ext_count; e++) {
+            const Held::Ext &x = r.exts[e];
+
+            send_chunk(r, staged + from, x.at - from);
+            send_chunk(r, static_cast<const uint32_t *>(x.corners), x.qwords * 4);
+            from = x.at;
         }
+        send_chunk(r, staged + from, rec.end - from);
         r.vu_since = rec.vu_end;
     }
     list.clear();
+    r.exts.clear();
     for (Texture *t : r.doomed) {
         drop_now(r, t);
     }
@@ -1957,6 +2011,7 @@ void fill(Held &r, uint32_t argb, uint32_t z, uint64_t ztst, bool zwrite)
     send_registers(r, values, names, 2);
     r.test = values[0];
     r.zbuf = values[1];
+    r.applied_ok = false;
     u64 *p = gif(r, 4);
 
     p[0] = GIF_TAG(1, 1, 1, GS_SETREG_PRIM(GS_PRIM_PRIM_SPRITE, 0, 0, 0, 0, 0, 0, 0, 0), GSKIT_GIF_FLG_PACKED,
@@ -2208,6 +2263,7 @@ void take_back(Held &r)
     }
     /* its deferred draws go unsent, and the textures they held go */
     r.deferred.clear();
+    r.exts.clear();
     r.defer = false;
     for (Texture *t : r.doomed) {
         drop_now(r, t);
@@ -2217,6 +2273,7 @@ void take_back(Held &r)
     r.tag = -1;
     r.direct = -1;
     r.model_open = false;
+    r.set_open = false;
     r.vu_palette = UINT32_MAX;
     for (Texture *t : r.uploads) {
         unplace(r, t);
@@ -2275,6 +2332,7 @@ void open_picture(Held &r)
      * for each stream before the next) */
     r.defer = ps2_sort != 0;
     r.deferred.clear();
+    r.exts.clear();
     r.parked = {r.staging[r.pictures & 1], 0, STAGING_QWORDS * 4, -1, -1, true, false};
     r.palette_keys.clear();
     r.palette_now = NO_PALETTE;
@@ -2360,6 +2418,22 @@ Texture *mirrored(Held &r, Texture *t, int flip)
     return made;
 }
 
+/* log2 of x, above 0, within 0.005: its exponent, and a quadratic over its
+ * mantissa's [1, 2). the EE's log2f takes a library call each draw, and
+ * TEX1's K, in 16ths of a level, needs no more */
+float log2_near(float x)
+{
+    uint32_t bits;
+    float m;
+
+    memcpy(&bits, &x, sizeof bits);
+    float e = static_cast<float>(static_cast<int>(bits >> 23 & 0xff) - 127);
+
+    bits = (bits & 0x7fffffU) | 0x3f800000U;
+    memcpy(&m, &bits, sizeof m);
+    return e + (-0.34484843F * m + 2.02466578F) * m - 0.67487759F;
+}
+
 Draw draw_of(Held &r, const psp_state &s)
 {
     Draw d;
@@ -2385,10 +2459,12 @@ Draw draw_of(Held &r, const psp_state &s)
      * pixels. the GS's level adds log2 of the depth */
     if (d.texture != nullptr && d.texture->levels > 1 && s.density > 0.0F && r.place.screen[0] > 0.0F) {
         float texels = s.density * sqrtf(static_cast<float>(d.texture->width) * d.texture->height) / 255.0F;
-        float k = log2f(texels / r.place.screen[0]) * 16.0F;
+        float k = log2_near(texels / r.place.screen[0]) * 16.0F;
 
         d.mip = true;
-        d.k = static_cast<int16_t>(k < -2048.0F ? -2048 : k > 2047.0F ? 2047 : lroundf(k));
+        d.k = static_cast<int16_t>(k < -2048.0F ? -2048
+                                   : k > 2047.0F ? 2047
+                                                 : static_cast<int>(k >= 0.0F ? k + 0.5F : k - 0.5F));
     }
     return d;
 }
@@ -3213,6 +3289,9 @@ bool psp_submit(const PictureUniform &picture, uint32_t clear, const std::vector
                 static_cast<unsigned>(ps2_models_kept / 1024), static_cast<unsigned>(ps2_models_short),
                 static_cast<unsigned>(ps2_models_emptied), static_cast<unsigned>(ps2_models_room / 1024),
                 static_cast<unsigned>(r.mirrors_short));
+        fprintf(stderr, "sa1: the draws' states: %u applied, %u of them as the last's or apart in K alone\n",
+                static_cast<unsigned>(r.applies / r.timed), static_cast<unsigned>(r.applies_kept / r.timed));
+        r.applies = r.applies_kept = 0;
         ps2_models_short = ps2_models_emptied = 0;
         r.mirrors_short = 0;
         r.taken_back = 0;
@@ -3480,7 +3559,7 @@ extern "C" void ps2_vu_palette(uint32_t key, const uint32_t *colors, const uint3
 {
     pc::Held &r = held;
 
-    if (!r.picture || r.model_open) {
+    if (!r.picture || r.model_open || r.set_open) {
         return;
     }
     /* while the picture defers its draws, the palette waits in its room for
@@ -3528,31 +3607,54 @@ extern "C" void ps2_vu_palette(uint32_t key, const uint32_t *colors, const uint3
     r.palettes_sent++;
 }
 
-/* a model batch's head, by UNPACK to VU1's buffer, under d, with room for
- * corner_words of corners after it in the stream; r.model_head is where it
- * lies (model.vsm) */
-static void model_head(pc::Held &r, const pc::Draw &d, const struct ps2_vu_shade *shade, uint32_t corner_words)
-{
-    bool textured = d.texture != nullptr, fogged = d.fog != SA_FOG_NONE, high = pc::highlights(d);
+/* a model batch's head as model.vsm takes it, under d, made once for each
+ * batch of a meshset's (ps2_vu_set_open) */
+static uint32_t model_terms[pc::VU_MODEL_HEAD * 4] __attribute__((aligned(16)));
 
-    /* the fog table once a picture, to the stream, ahead of every deferred
-     * draw it serves */
-    if (fogged && !r.vu_fog) {
+/* the words of VIF1's a batch takes past its corners' at most: the head's
+ * UNPACK at a qword's end, the head, its REF's tags and the MSCAL */
+constexpr uint32_t MODEL_BATCH_WORDS = 8 + pc::VU_MODEL_HEAD * 4 + 4 + 8 + 4;
+
+/* the fog table once a picture, to the stream, ahead of every deferred
+ * draw it serves; then the draw of d begins */
+static void model_begin(pc::Held &r, const pc::Draw &d, uint32_t words_most)
+{
+    if (d.fog != SA_FOG_NONE && !r.vu_fog) {
         pc::send_vu_fog(r);
     }
-    pc::begin_draw(r, d, 16 + pc::VU_MODEL_HEAD * 4 + 4 + corner_words + 8, true);
+    pc::begin_draw(r, d, words_most, true);
+}
+
+/* a head of model_terms', by UNPACK to VU1's buffer, with room for
+ * corner_words of corners after it in the stream; r.model_head is where it
+ * lies (model.vsm) */
+static void model_put(pc::Held &r, uint32_t corner_words)
+{
     pc::room(r, 8 + pc::VU_MODEL_HEAD * 4 + 4 + corner_words + 8);
     pc::close_direct(r);
     while (r.at % 4 != 3) {
         pc::put(r, 0);
     }
     pc::put(r, pc::vif_code(pc::UNPACK_V4_32, pc::VU_MODEL_HEAD, pc::UNPACK_TOPS));
-    uint32_t *w = pc::words(r) + r.at;
+    memcpy(pc::words(r) + r.at, model_terms, sizeof model_terms);
+    r.model_head = r.at;
+    r.at += pc::VU_MODEL_HEAD * 4;
+}
+
+/* model_terms of d's and shade's, under r's place, and r.model_prim */
+static void model_make(pc::Held &r, const pc::Draw &d, const struct ps2_vu_shade *shade)
+{
+    bool textured = d.texture != nullptr, fogged = d.fog != SA_FOG_NONE, high = pc::highlights(d);
+    uint32_t *w = model_terms;
     float *h = reinterpret_cast<float *>(w);
 
     r.model_prim = GS_SETREG_PRIM(GS_PRIM_PRIM_TRISTRIP, 1, textured ? 1 : 0, fogged ? 1 : 0, d.blend ? 1 : 0, 0, 0,
                                   0, 0);
-    memset(w, 0, pc::VU_MODEL_HEAD * 16);
+    /* the words no term below writes are 0: qword 1's (the count and the
+     * packed word, model_tag's and the batch's), the light's w, qword 14's
+     * w and qword 15's x. the tags, 16 and 17, are model_tag's */
+    w[4] = w[5] = w[6] = w[7] = 0;
+    w[43] = w[59] = w[60] = 0;
     /* the fog's terms, as send_vu gives strip.vsm them */
     h[0] = r.fog.density;
     h[1] = fogged ? 1.0F : 0.0F;
@@ -3595,15 +3697,22 @@ static void model_head(pc::Held &r, const pc::Draw &d, const struct ps2_vu_shade
     h[61] = 1.0F / (pc::REACH * 320.0F - fabsf(r.place.screen[2] - 320.0F));
     h[62] = 1.0F / ((pc::REACH * 240.0F - fabsf(r.place.screen[3] - 240.0F)) * pc::y_scale());
     h[63] = 2.0F;
-    r.model_head = r.at;
-    r.at += pc::VU_MODEL_HEAD * 4;
+}
+
+/* a model batch's head, its draw begun under d, with room for corner_words
+ * of corners after it in the stream */
+static void model_head(pc::Held &r, const pc::Draw &d, const struct ps2_vu_shade *shade, uint32_t corner_words)
+{
+    model_begin(r, d, MODEL_BATCH_WORDS + 8 + corner_words);
+    model_make(r, d, shade);
+    model_put(r, corner_words);
 }
 
 extern "C" float *ps2_vu_open(const struct psp_state *state, const struct ps2_vu_shade *shade)
 {
     pc::Held &r = held;
 
-    if (!r.picture || r.model_open) {
+    if (!r.picture || r.model_open || r.set_open) {
         return nullptr;
     }
     model_head(r, pc::draw_of(r, *state), shade, PS2_VU_CORNERS * 12);
@@ -3633,14 +3742,20 @@ static void model_tag(pc::Held &r, uint32_t count, uint32_t unpack)
     }
 }
 
-/* VU1's work of a batch done, after its corners */
-static void model_end(pc::Held &r, uint32_t count)
+/* VU1's work of a batch, after its corners */
+static void model_call(pc::Held &r, uint32_t count)
 {
     pc::put(r, pc::vif_code(pc::VIF_MSCAL, 0, pc::VU_MODEL_AT));
     r.vu_since = true;
     r.triangles += count - 2;
     r.vu_triangles += count - 2;
     r.vu_batches++;
+}
+
+/* VU1's work of a batch, and its draw's end */
+static void model_end(pc::Held &r, uint32_t count)
+{
+    model_call(r, count);
     pc::end_draw(r);
 }
 
@@ -3729,36 +3844,81 @@ namespace {
 /* a model batch from the caller's memory, by REF, under d: its corners
  * packed (ps2_vu_pack), with their own UNPACKs, which the head's word tells
  * VU1's program to turn back to floats */
-void vu_batch_ref(Held &r, const Draw &d, const ps2_vu_shade *shade, const float *corners, uint32_t count)
+void batch_ref(Held &r, const float *corners, uint32_t count)
 {
     uint32_t qwords = packed_qwords(count);
 
-    model_head(r, d, shade, 0);
+    model_put(r, 0);
     model_tag(r, count, UINT32_MAX);
     pc::words(r)[r.model_head + 5] = 1;
     if (r.recording) {
         pc::Held::Deferred &rec = r.deferred.back();
 
-        rec.ext = corners;
-        rec.ext_at = r.at;
-        rec.ext_qwords = qwords;
+        if (rec.ext_count == 0) {
+            rec.ext_first = static_cast<uint32_t>(r.exts.size());
+        }
+        r.exts.push_back({corners, r.at, qwords});
+        rec.ext_count++;
     } else {
         pc::send_chunk(r, reinterpret_cast<const uint32_t *>(corners), qwords * 4);
     }
     /* past the REF, the MSCAL takes a tag of its own */
     pc::room(r, 4);
     r.batches_cached++;
-    model_end(r, count);
+    model_call(r, count);
+}
+
+void vu_batch_ref(Held &r, const Draw &d, const ps2_vu_shade *shade, const float *corners, uint32_t count)
+{
+    model_begin(r, d, MODEL_BATCH_WORDS + 8);
+    model_make(r, d, shade);
+    batch_ref(r, corners, count);
+    pc::end_draw(r);
 }
 } // namespace
 } // namespace pc
+
+extern "C" int ps2_vu_set_open(const struct psp_state *state, const struct ps2_vu_shade *shade, uint32_t batches)
+{
+    pc::Held &r = held;
+
+    if (!r.picture || r.model_open || r.set_open || batches == 0) {
+        return 0;
+    }
+    pc::Draw d = pc::draw_of(r, *state);
+
+    model_begin(r, d, MODEL_BATCH_WORDS * batches + 8);
+    model_make(r, d, shade);
+    r.set_open = true;
+    return 1;
+}
+
+extern "C" void ps2_vu_set_batch(const float *corners, uint32_t count)
+{
+    pc::Held &r = held;
+
+    if (!r.set_open || count < 3 || count > PS2_VU_CORNERS) {
+        return;
+    }
+    pc::batch_ref(r, corners, count);
+}
+
+extern "C" void ps2_vu_set_close(void)
+{
+    pc::Held &r = held;
+
+    if (r.set_open) {
+        r.set_open = false;
+        pc::end_draw(r);
+    }
+}
 
 extern "C" void ps2_vu_batch(const struct psp_state *state, const struct ps2_vu_shade *shade, const float *corners,
                              uint32_t count)
 {
     pc::Held &r = held;
 
-    if (!r.picture || r.model_open || count < 3 || count > PS2_VU_CORNERS) {
+    if (!r.picture || r.model_open || r.set_open || count < 3 || count > PS2_VU_CORNERS) {
         return;
     }
     pc::vu_batch_ref(r, pc::draw_of(r, *state), shade, corners, count);
@@ -3771,7 +3931,7 @@ extern "C" int ps2_vu_batch_later(float depth, const struct psp_state *state, co
 
     /* the palette waits in the picture's room only while the picture
      * defers its draws */
-    if (!r.picture || r.model_open || !r.defer || count < 3 || count > PS2_VU_CORNERS || !pc::blend_room(r, 0)) {
+    if (!r.picture || r.model_open || r.set_open || !r.defer || count < 3 || count > PS2_VU_CORNERS || !pc::blend_room(r, 0)) {
         return 0;
     }
     pc::Blend bl;

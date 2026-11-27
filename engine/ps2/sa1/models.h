@@ -945,6 +945,18 @@ static int models_draw(const NJS_MODEL *model, uint8_t mode, const struct draw_s
                         }
                     }
                 }
+                /* an opaque meshset's batches go as one draw, under one
+                 * state and head (gs.cpp's ps2_vu_set_open) */
+                int set = 0;
+
+                if (!drawn.blend) {
+                    uint32_t going = 0;
+
+                    for (uint32_t b = 0; b < k->count && b < 1024; b++) {
+                        going += side[b] == 0;
+                    }
+                    set = going != 0 && ps2_vu_set_open(&drawn, &w.shade, going);
+                }
                 for (uint32_t b = 0; b < k->count && b < 1024; b++) {
                     const struct models_cached *cb = &k->batches[b];
 
@@ -952,6 +964,10 @@ static int models_draw(const NJS_MODEL *model, uint8_t mode, const struct draw_s
                         continue;
                     }
                     ps2_models_cached_corners += cb->count;
+                    if (set) {
+                        ps2_vu_set_batch(cb->corners, cb->count);
+                        continue;
+                    }
                     if (!drawn.blend) {
                         ps2_vu_batch(&drawn, &w.shade, cb->corners, cb->count);
                         continue;
@@ -965,6 +981,9 @@ static int models_draw(const NJS_MODEL *model, uint8_t mode, const struct draw_s
                         memset(take + cb->first, 1, cb->last - cb->first + 1);
                         any = 1;
                     }
+                }
+                if (set) {
+                    ps2_vu_set_close();
                 }
                 if (!any) {
                     continue;

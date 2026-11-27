@@ -159,6 +159,9 @@ ps2_vu_open                          engine       ps2      room in the PS2's pic
 psp_draw_later_within                engine       ps2      a strip kept for the picture's end that its caller found within the raster's reach, sorted whole by its own depth
 ps2_vu_close                         engine       ps2      that batch's end, of the corners written, which goes to VU1
 ps2_vu_batch                         engine       ps2      a cached batch of a model's corners, which VIF1 reads from the caller's memory (engine/ps2/sa1/models.h)
+ps2_vu_set_open                      engine       ps2      a meshset's cached batches under one state and head, one draw of the picture's (engine/ps2/sa1/models.h)
+ps2_vu_set_batch                     engine       ps2      a batch of the open meshset's, which VIF1 reads from the caller's memory
+ps2_vu_set_close                     engine       ps2      the open meshset's batches' end
 ps2_vu_release                       engine       ps2      a cached batch's corners given up, freed once no command reads them
 ps2_vu_packed_bytes                  engine       ps2      the bytes of a cached batch's corners packed for VU1 (engine/ps2/gs.cpp)
 ps2_vu_pack                          engine       ps2      a cached batch's corners packed for VU1, with their own UNPACKs
