@@ -708,7 +708,7 @@ static int models_draw(const NJS_MODEL *model, uint8_t mode, const struct draw_s
     static struct psp_corner strip[WALK_STRIP];
     static uint8_t sides[WALK_STRIP];
     static uint8_t take[MODELS_TAKE];
-    int all, offset_counts;
+    int all, offset_counts, offset_pass;
     const float *m = native_xmtrx();
     float reach = psp_draw_reach();
     const NJS_POINT3 *points = model->points;
@@ -911,7 +911,10 @@ static int models_draw(const NJS_MODEL *model, uint8_t mode, const struct draw_s
         if (drawn.blend) {
             ps2_models_blend_why[w.env ? 0 : offset_counts ? 1 : 3]++;
         }
-        if (!offset_counts && !w.env && set->nbMesh <= MODELS_TAKE) {
+        /* a blend's palette offset over its texture goes from the cache
+         * too, by VU1's second pass (gs.cpp's ps2_vu_batch_later) */
+        offset_pass = offset_counts && drawn.blend && !w.unlit_offsets;
+        if ((!offset_counts || offset_pass) && !w.env && set->nbMesh <= MODELS_TAKE) {
             const struct models_kept *k = models_kept_for(model, set, shape, cull, &w);
 
             if (k && k->count <= 1024) {
@@ -977,7 +980,7 @@ static int models_draw(const NJS_MODEL *model, uint8_t mode, const struct draw_s
                      * corners' words say */
                     drawn.cull = 0;
                     if (!ps2_vu_batch_later(cb->center[0] * m[2] + cb->center[1] * m[6] + cb->center[2] * m[10] + m[14],
-                                            &drawn, &w.shade, cb->corners, cb->count)) {
+                                            &drawn, &w.shade, cb->corners, cb->count, offset_pass)) {
                         memset(take + cb->first, 1, cb->last - cb->first + 1);
                         any = 1;
                     }

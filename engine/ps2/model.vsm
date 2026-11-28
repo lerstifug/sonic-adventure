@@ -14,7 +14,8 @@
 ;           fogged, 4
 ;   1       x: the corners' count, an integer; y: 1 where they come
 ;           packed, as the model cache keeps them (gs.cpp's ps2_vu_pack),
-;           else 0
+;           else 0; z: 1 for a blend's offset pass, whose corners each take
+;           their palette entry's offset for their color, else 0
 ;   2-5     the model's matrix, Ninja's rows: a point is a row times it
 ;   6       the screen's scale: focal x, focal y, the depth's most, and one
 ;           less highlighted
@@ -245,6 +246,17 @@ model_corner:
         NOP                     NOP
         NOP                     NOP
         addz.x VF14, VF26, VF21z NOP
+; an offset's pass takes the entry's offset for its color (qword 1's z)
+        NOP                     ilw.z VI08, 1(VI02)
+        NOP                     NOP
+        NOP                     NOP
+        NOP                     ibeq VI08, VI00, model_color
+        NOP                     NOP
+        addy.x VF25, VF00, VF25y NOP
+        NOP                     NOP
+        NOP                     NOP
+        NOP                     NOP
+model_color:
         mulz.x VF26, VF25, VF20z NOP
         NOP                     NOP
         NOP                     NOP

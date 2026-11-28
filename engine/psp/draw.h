@@ -186,10 +186,11 @@ void ps2_vu_set_close(void);
  * command it sent reads them */
 void ps2_vu_release(void *corners);
 /* as ps2_vu_batch, for a batch that blends: it waits for the picture's sort
- * of the blends at depth, the depth of its middle. 0 where the raster can't
- * keep it, which the caller draws as before */
+ * of the blends at depth, the depth of its middle. offset_pass adds its
+ * palette's offset over it by a second pass, untextured. 0 where the raster
+ * can't keep it, which the caller draws as before */
 int ps2_vu_batch_later(float depth, const struct psp_state *state, const struct ps2_vu_shade *shade,
-                       const float *corners, uint32_t count);
+                       const float *corners, uint32_t count, int offset_pass);
 void ps2_vu_close(uint32_t count);
 /* the palette a batch lights by: 256 entries, each a color and an offset,
  * ARGB, the colors' every second word from colors and the offsets' from

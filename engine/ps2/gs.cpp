@@ -1904,7 +1904,8 @@ void send_triangles(Held &r, const Draw &d, const Screen &s, const Corner *tri, 
  * as a packet */
 void send_vu(Held &r, const Draw &d, const Placed &placed, const psp_corner *corners, uint32_t count, bool reversed,
              int pass = 0);
-void vu_batch_ref(Held &r, const Draw &d, const ps2_vu_shade *shade, const float *corners, uint32_t count);
+void vu_batch_ref(Held &r, const Draw &d, const ps2_vu_shade *shade, const float *corners, uint32_t count,
+                  bool offset_pass = false);
 
 void draw_blends(Held &r)
 {
@@ -1954,6 +1955,44 @@ void draw_blends(Held &r)
             }
             r.place = r.places[at.place];
             vu_batch_ref(r, d, &at.shade, at.corners, at.count);
+            if (at.lit) {
+                /* its offset added over it untextured, as a kept strip's
+                 * second pass adds it: each corner's palette entry's
+                 * offset for its color (model.vsm), and the GS's fog,
+                 * toward black, fading it by the corner's fog */
+                Draw add = d;
+                ps2_vu_shade lit = at.shade;
+                bool fogged = d.fog != SA_FOG_NONE;
+
+                add.texture = nullptr;
+                add.blend = true;
+                add.src = SA_BLEND_SRC_ALPHA;
+                add.dst = SA_BLEND_ONE;
+                add.depth = SA_DEPTH_GEQUAL;
+                add.depth_write = false;
+                add.cut = false;
+                add.mip = false;
+                for (int k = 0; k < 3; k++) {
+                    lit.scale[k] = 1.0F;
+                    lit.add[k] = 0.0F;
+                }
+                lit.scale[3] = 0.0F;
+                lit.add[3] = 255.0F;
+                if (fogged) {
+                    uint64_t black = 0, name = GS_FOGCOL_REG;
+
+                    send_registers(r, &black, &name, 1);
+                }
+                vu_batch_ref(r, add, &lit, at.corners, at.count, true);
+                if (fogged) {
+                    uint32_t c = r.fog.color;
+                    uint64_t color = static_cast<uint64_t>(c >> 16 & 0xff) | (c >> 8 & 0xff) << 8 | (c & 0xff) << 16,
+                             name = GS_FOGCOL_REG;
+
+                    send_registers(r, &color, &name, 1);
+                }
+                r.blend_lit++;
+            }
             r.place = was;
             i++;
             continue;
@@ -3844,13 +3883,14 @@ namespace {
 /* a model batch from the caller's memory, by REF, under d: its corners
  * packed (ps2_vu_pack), with their own UNPACKs, which the head's word tells
  * VU1's program to turn back to floats */
-void batch_ref(Held &r, const float *corners, uint32_t count)
+void batch_ref(Held &r, const float *corners, uint32_t count, bool offset_pass = false)
 {
     uint32_t qwords = packed_qwords(count);
 
     model_put(r, 0);
     model_tag(r, count, UINT32_MAX);
     pc::words(r)[r.model_head + 5] = 1;
+    pc::words(r)[r.model_head + 6] = offset_pass ? 1 : 0;
     if (r.recording) {
         pc::Held::Deferred &rec = r.deferred.back();
 
@@ -3868,11 +3908,12 @@ void batch_ref(Held &r, const float *corners, uint32_t count)
     model_call(r, count);
 }
 
-void vu_batch_ref(Held &r, const Draw &d, const ps2_vu_shade *shade, const float *corners, uint32_t count)
+void vu_batch_ref(Held &r, const Draw &d, const ps2_vu_shade *shade, const float *corners, uint32_t count,
+                  bool offset_pass)
 {
     model_begin(r, d, MODEL_BATCH_WORDS + 8);
     model_make(r, d, shade);
-    batch_ref(r, corners, count);
+    batch_ref(r, corners, count, offset_pass);
     pc::end_draw(r);
 }
 } // namespace
@@ -3925,7 +3966,7 @@ extern "C" void ps2_vu_batch(const struct psp_state *state, const struct ps2_vu_
 }
 
 extern "C" int ps2_vu_batch_later(float depth, const struct psp_state *state, const struct ps2_vu_shade *shade,
-                                  const float *corners, uint32_t count)
+                                  const float *corners, uint32_t count, int offset_pass)
 {
     pc::Held &r = held;
 
@@ -3943,6 +3984,7 @@ extern "C" int ps2_vu_batch_later(float depth, const struct psp_state *state, co
     bl.corners = corners;
     bl.shade = *shade;
     bl.palette = r.palette_now;
+    bl.lit = offset_pass != 0;
     pc::keep_place(r);
     bl.place = static_cast<uint32_t>(r.places.size() - 1);
     r.blends.push_back(bl);
